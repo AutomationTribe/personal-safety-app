@@ -3,13 +3,13 @@ import {
   Alert,
   Animated,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../lib/supabase';
 import { useNetworkStatus } from '../../hooks/useNetworkStatus';
 import { startTracking, stopTracking, getLastPing, LocationPing } from '../../services/LocationService';
@@ -297,10 +297,12 @@ interface IdleViewProps {
   onStartTrip: () => void;
 }
 
-const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip }: IdleViewProps) => (
-  <SafeAreaView style={styles.idleRoot}>
+const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip }: IdleViewProps) => {
+  const insets = useSafeAreaInsets();
+  return (
+  <View style={styles.idleRoot}>
     {/* Header */}
-    <View style={styles.idleHeader}>
+    <View style={[styles.idleHeader, { paddingTop: insets.top + 10 }]}>
       <View>
         <Text style={styles.idleGreeting}>{greeting()},</Text>
         <Text style={styles.idleName}>{firstName(userName) || 'Traveller'}</Text>
@@ -391,14 +393,15 @@ const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip }: Id
     </ScrollView>
 
     {/* Bottom tab bar */}
-    <View style={styles.tabBar}>
+    <View style={[styles.tabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
       <TabBarItem icon="home" label="Home" active />
       <TabBarItem icon="map" label="Routes" />
       <TabBarItem icon="users" label="Circle" />
       <TabBarItem icon="settings" label="Settings" />
     </View>
-  </SafeAreaView>
-);
+  </View>
+  );
+};
 
 // ── Active trip state ─────────────────────────────────────────────────────────
 
@@ -437,10 +440,11 @@ const ActiveTripView = ({
     ? `${contactNames[0]} can see you right now.`
     : 'Your circle can see you right now.';
 
+  const insets = useSafeAreaInsets();
   return (
-    <SafeAreaView style={styles.activeRoot}>
+    <View style={styles.activeRoot}>
       {/* Header */}
-      <View style={styles.activeHeader}>
+      <View style={[styles.activeHeader, { paddingTop: insets.top + 10 }]}>
         <Text style={styles.activeEyebrow}>TRIP IN PROGRESS</Text>
         <Text style={styles.activeTitle} numberOfLines={1}>
           {trip.origin ?? 'Origin'}  →  {trip.destination ?? 'Destination'}
@@ -521,13 +525,13 @@ const ActiveTripView = ({
       </ScrollView>
 
       {/* Dark bottom tab bar */}
-      <View style={styles.darkTabBar}>
+      <View style={[styles.darkTabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
         <TabBarItem icon="home" label="Home" active dark />
         <TabBarItem icon="map" label="Routes" dark />
         <TabBarItem icon="users" label="Circle" dark />
         <TabBarItem icon="settings" label="Settings" dark />
       </View>
-    </SafeAreaView>
+    </View>
   );
 };
 
@@ -583,7 +587,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: spacing.screenPadding,
-    paddingTop: spacing.gap16,
     paddingBottom: spacing.gap12,
     backgroundColor: colors.brand.bgCard,
     borderBottomWidth: 1,
@@ -767,7 +770,6 @@ const styles = StyleSheet.create({
   activeRoot: { flex: 1, backgroundColor: colors.brand.darkBase },
   activeHeader: {
     paddingHorizontal: spacing.screenPadding,
-    paddingTop: spacing.gap16,
     paddingBottom: spacing.gap16,
     backgroundColor: colors.brand.darkBase,
     borderBottomWidth: 1,
