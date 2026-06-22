@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { supabase } from '../../lib/supabase';
 import { colors, fontSizes, spacing } from '../../styles/tokens';
@@ -25,6 +26,7 @@ type Props = {
 const LAST_IDENTIFIER_KEY = 'HADIN_LAST_SIGNIN_ID';
 
 const LoginScreen = ({ navigation }: Props) => {
+  const insets = useSafeAreaInsets();
   const identifierRef = useRef<TextInput | null>(null);
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
@@ -43,7 +45,7 @@ const LoginScreen = ({ navigation }: Props) => {
 
   const handleSubmit = async () => {
     if (!identifier.trim() || !password) {
-      setAuthError('Please enter your email or phone number and password');
+      setAuthError('Please enter your email or phone number and password.');
       return;
     }
     setLoading(true);
@@ -57,7 +59,7 @@ const LoginScreen = ({ navigation }: Props) => {
     setLoading(false);
 
     if (error) {
-      setAuthError('Incorrect email/phone or password');
+      setAuthError('Incorrect email/phone or password.');
       return;
     }
 
@@ -68,32 +70,44 @@ const LoginScreen = ({ navigation }: Props) => {
     <KeyboardAvoidingView
       style={styles.root}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
     >
       <ScrollView
         contentContainerStyle={styles.container}
         keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>Hadin</Text>
-          <Text style={styles.headerSubtitle}>Never travel alone again.</Text>
+        {/* ── Green header ── */}
+        <View style={[styles.header, { paddingTop: insets.top + 10 }]}>
+          {navigation.canGoBack() && (
+            <Pressable style={styles.backBtn} onPress={() => navigation.goBack()} hitSlop={12}>
+              <Feather name="arrow-left" size={20} color="rgba(255,255,255,0.75)" />
+            </Pressable>
+          )}
+          <View style={styles.brandRow}>
+            <Feather name="shield" size={16} color={colors.brand.mid} />
+            <Text style={styles.brandName}>Hadin</Text>
+          </View>
+          <Text style={styles.headerEyebrow}>Welcome back</Text>
+          <Text style={styles.headerHeadline}>Your circle{'\n'}missed you.</Text>
+          <Text style={styles.headerSub}>
+            Sign in to continue your journey with the people you love.
+          </Text>
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Welcome back</Text>
-          <Text style={styles.cardSubtitle}>Sign in to continue</Text>
-
+        {/* ── Body ── */}
+        <View style={styles.body}>
           <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Email or phone</Text>
             <View style={styles.inputWrapper}>
-              <Feather name="user" size={18} color={colors.textSecondary} style={styles.leftIcon} />
+              <Feather name="user" size={16} color="#9C9A92" style={styles.leftIcon} />
               <TextInput
                 ref={identifierRef}
                 style={styles.input}
                 value={identifier}
                 onChangeText={setIdentifier}
                 editable={!loading}
-                placeholder="Email or phone number"
-                placeholderTextColor={colors.textTertiary}
+                placeholder="you@email.com or +234…"
+                placeholderTextColor="#C5C3BB"
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -103,26 +117,22 @@ const LoginScreen = ({ navigation }: Props) => {
           </View>
 
           <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Password</Text>
             <View style={styles.inputWrapper}>
-              <Feather name="lock" size={18} color={colors.textSecondary} style={styles.leftIcon} />
+              <Feather name="lock" size={16} color="#9C9A92" style={styles.leftIcon} />
               <TextInput
                 style={styles.input}
                 value={password}
                 onChangeText={setPassword}
                 editable={!loading}
-                placeholder="Password"
-                placeholderTextColor={colors.textTertiary}
+                placeholder="Your password"
+                placeholderTextColor="#C5C3BB"
                 secureTextEntry={!showPassword}
                 returnKeyType="done"
                 onSubmitEditing={handleSubmit}
               />
-              <Pressable onPress={() => setShowPassword(!showPassword)}>
-                <Feather
-                  name={showPassword ? 'eye-off' : 'eye'}
-                  size={18}
-                  color={colors.textSecondary}
-                  style={styles.rightIcon}
-                />
+              <Pressable onPress={() => setShowPassword((v) => !v)} hitSlop={8}>
+                <Feather name={showPassword ? 'eye-off' : 'eye'} size={16} color="#9C9A92" />
               </Pressable>
             </View>
           </View>
@@ -139,15 +149,12 @@ const LoginScreen = ({ navigation }: Props) => {
           {authError ? <Text style={styles.errorText}>{authError}</Text> : null}
 
           <Pressable
-            style={({ pressed }) => [
-              styles.button,
-              pressed && !loading ? styles.buttonPressed : null,
-            ]}
+            style={({ pressed }) => [styles.button, pressed && !loading && styles.buttonPressed]}
             onPress={handleSubmit}
             disabled={loading}
           >
             {loading ? (
-              <ActivityIndicator color={colors.white} />
+              <ActivityIndicator color="#fff" />
             ) : (
               <Text style={styles.buttonText}>Sign in</Text>
             )}
@@ -155,7 +162,7 @@ const LoginScreen = ({ navigation }: Props) => {
 
           <View style={styles.dividerRow}>
             <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>or</Text>
+            <Text style={styles.dividerText}>or continue with</Text>
             <View style={styles.dividerLine} />
           </View>
 
@@ -165,13 +172,15 @@ const LoginScreen = ({ navigation }: Props) => {
           >
             <Text style={styles.socialButtonText}>Continue with Google</Text>
           </Pressable>
-        </View>
 
-        <View style={styles.bottomRow}>
-          <Text style={styles.bottomText}>Don't have an account? </Text>
-          <Pressable onPress={() => navigation.navigate('Signup')} disabled={loading}>
-            <Text style={styles.bottomLink}>Sign up</Text>
-          </Pressable>
+          <View style={styles.switchRow}>
+            <Text style={styles.switchText}>New to Hadin? </Text>
+            <Pressable onPress={() => navigation.navigate('Signup')} disabled={loading}>
+              <Text style={styles.switchLink}>Create an account</Text>
+            </Pressable>
+          </View>
+
+          <Text style={styles.tagline}>Peace of mind, always on.</Text>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -179,70 +188,86 @@ const LoginScreen = ({ navigation }: Props) => {
 };
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.background },
-  container: { paddingBottom: spacing.gap32 },
+  root: { flex: 1, backgroundColor: colors.brand.bgSurface },
+  container: { flexGrow: 1, paddingBottom: spacing.gap32 },
+
+  // ── Header ──
   header: {
-    height: 140,
-    backgroundColor: colors.ink,
-    justifyContent: 'center',
-    alignItems: 'center',
+    backgroundColor: colors.brand.primary,
     paddingHorizontal: spacing.screenPadding,
+    paddingBottom: spacing.gap32,
   },
-  headerTitle: {
+  backBtn: { marginBottom: spacing.gap16 },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: spacing.gap20,
+  },
+  brandName: {
     color: colors.white,
-    fontSize: 32,
+    fontSize: fontSizes.caption,
     fontWeight: '700',
-    marginBottom: 4,
+    letterSpacing: 0.5,
+  },
+  headerEyebrow: {
+    fontSize: fontSizes.caption,
+    fontWeight: '600',
+    color: colors.brand.mid,
+    letterSpacing: 0.4,
+    marginBottom: spacing.gap8,
+  },
+  headerHeadline: {
+    fontSize: 32,
+    fontWeight: '800',
+    color: colors.white,
+    lineHeight: 40,
+    marginBottom: spacing.gap12,
     letterSpacing: -0.5,
   },
-  headerSubtitle: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 14,
+  headerSub: {
+    fontSize: fontSizes.caption,
+    color: 'rgba(255,255,255,0.65)',
+    lineHeight: 20,
   },
-  card: {
-    backgroundColor: colors.surface,
-    marginHorizontal: spacing.screenPadding,
-    marginTop: -20,
-    borderRadius: spacing.borderRadiusLg,
-    padding: spacing.screenPadding,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 4,
-  },
-  cardTitle: {
-    color: colors.textPrimary,
-    fontSize: 22,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  cardSubtitle: {
-    color: colors.textSecondary,
-    fontSize: 14,
-    marginBottom: spacing.gap24,
+
+  // ── Body ──
+  body: {
+    backgroundColor: colors.brand.bgSurface,
+    paddingHorizontal: spacing.screenPadding,
+    paddingTop: spacing.gap24,
   },
   inputGroup: { marginBottom: spacing.gap16 },
+  inputLabel: {
+    fontSize: fontSizes.caption,
+    fontWeight: '600',
+    color: colors.brand.textSecondary,
+    marginBottom: 6,
+    letterSpacing: 0.2,
+  },
   inputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
     height: spacing.inputHeight,
-    borderWidth: 1,
-    borderColor: colors.border,
+    borderWidth: 0.5,
+    borderColor: 'rgba(0,0,0,0.12)',
     borderRadius: spacing.inputRadius,
     paddingHorizontal: spacing.gap16,
-    backgroundColor: colors.background,
+    backgroundColor: colors.white,
   },
   leftIcon: { marginRight: spacing.gap12 },
-  rightIcon: { marginLeft: spacing.gap12 },
   input: {
     flex: 1,
-    color: colors.textPrimary,
+    color: colors.brand.textPrimary,
     fontSize: fontSizes.body,
     height: '100%',
   },
   forgotRow: { alignItems: 'flex-end', marginBottom: spacing.gap20 },
-  forgotText: { color: colors.primary, fontSize: fontSizes.caption },
+  forgotText: {
+    color: colors.brand.primary,
+    fontSize: fontSizes.caption,
+    fontWeight: '600',
+  },
   errorText: {
     color: colors.danger,
     fontSize: fontSizes.caption,
@@ -251,7 +276,7 @@ const styles = StyleSheet.create({
   button: {
     height: spacing.buttonHeight,
     borderRadius: spacing.borderRadius,
-    backgroundColor: colors.primary,
+    backgroundColor: colors.brand.primary,
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: spacing.gap16,
@@ -260,44 +285,51 @@ const styles = StyleSheet.create({
   buttonText: {
     color: colors.white,
     fontSize: fontSizes.button,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   dividerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: spacing.gap16,
   },
-  dividerLine: { flex: 1, height: 1, backgroundColor: colors.border },
+  dividerLine: { flex: 1, height: 0.5, backgroundColor: 'rgba(0,0,0,0.1)' },
   dividerText: {
     marginHorizontal: spacing.gap12,
-    color: colors.textSecondary,
+    color: colors.brand.textSecondary,
     fontSize: fontSizes.caption,
   },
   socialButton: {
     height: spacing.buttonHeight,
     borderRadius: spacing.borderRadius,
-    borderWidth: 1,
-    borderColor: colors.border,
+    borderWidth: 0.5,
+    borderColor: 'rgba(0,0,0,0.12)',
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: colors.surface,
+    backgroundColor: colors.white,
+    marginBottom: spacing.gap24,
   },
   socialButtonText: {
-    color: colors.textPrimary,
+    color: colors.brand.textPrimary,
     fontSize: fontSizes.body,
-    fontWeight: '500',
+    fontWeight: '600',
   },
-  bottomRow: {
+  switchRow: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    marginTop: spacing.gap24,
+    marginBottom: spacing.gap24,
   },
-  bottomText: { color: colors.textSecondary, fontSize: fontSizes.body },
-  bottomLink: {
-    color: colors.primary,
+  switchText: { color: colors.brand.textSecondary, fontSize: fontSizes.body },
+  switchLink: {
+    color: colors.brand.primary,
     fontSize: fontSizes.body,
-    fontWeight: '600',
+    fontWeight: '700',
+  },
+  tagline: {
+    textAlign: 'center',
+    fontSize: fontSizes.caption,
+    color: colors.brand.textSecondary,
+    fontStyle: 'italic',
   },
 });
 
