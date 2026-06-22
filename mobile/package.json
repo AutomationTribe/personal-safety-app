@@ -28,7 +28,11 @@
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",
+    "@types/js-yaml": "^4.0.9",
     "@types/react": "~19.1.10",
+    "@types/swagger-ui-express": "^4.1.8",
+    "js-yaml": "^5.0.0",
+    "swagger-ui-express": "^5.0.1",
     "typescript": "~5.9.2"
   },
   "private": true
