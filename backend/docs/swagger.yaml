@@ -1,0 +1,972 @@
+openapi: 3.0.3
+
+info:
+  title: Hadin Travel Safety API
+  description: |
+    Backend API for the Hadin travel safety mobile app.
+    Handles trip management, GPS location ingestion, SOS alerts, and trusted contacts.
+
+    **Authentication:** All `/api/v1/` routes require a Supabase-issued JWT passed as
+    a Bearer token in the `Authorization` header. Auth (signup/login) is handled
+    directly by Supabase — the endpoints below are documented for reference only.
+
+    **Coordinates:** All location fields in request bodies use `{ lat, lng }` as plain
+    numbers. The backend converts these to PostGIS `geography(Point,4326)` before storage.
+
+    **Error shape:** Every error response follows `{ error: string, code: string }`.
+  version: 1.0.0
+  contact:
+    name: Hadin Engineering
+
+servers:
+  - url: http://localhost:3001
+    description: Local development
+  - url: https://api.hadin.app
+    description: Production (Railway)
+
+tags:
+  - name: auth
+    description: Supabase-managed authentication (documented as external reference)
+  - name: trips
+    description: Trip lifecycle management
+  - name: location
+    description: GPS ping ingestion and retrieval
+  - name: sos
+    description: SOS alert triggering and resolution
+  - name: contacts
+    description: Trusted contact management
+
+# ── Security scheme ───────────────────────────────────────────────────────────
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Supabase access token from auth.signIn / auth.signUp
+
+  # ── Reusable schemas ─────────────────────────────────────────────────────────
+
+  schemas:
+
+    Error:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+          example: Trip not found
+        code:
+          type: string
+          example: TRIP_NOT_FOUND
+
+    Coords:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat:
+          type: number
+          format: double
+          example: 6.5244
+        lng:
+          type: number
+          format: double
+          example: 3.3792
+
+    TripStatus:
+      type: string
+      enum: [active, completed, sos]
+
+    PingSource:
+      type: string
+      enum: [gps, network, passive]
+
+    DeliveryMethod:
+      type: string
+      enum: [internet, sms, both]
+
+    Trip:
+      type: object
+      required: [id, user_id, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          example: Lagos to Abuja
+        origin:
+          type: string
+          example: Lagos
+        destination:
+          type: string
+          example: Abuja
+        status:
+          $ref: '#/components/schemas/TripStatus'
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+        expected_duration_minutes:
+          type: integer
+          nullable: true
+          example: 360
+        created_at:
+          type: string
+          format: date-time
+
+    LocationPing:
+      type: object
+      required: [id, trip_id, user_id, lat, lng, source, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        trip_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        accuracy:
+          type: number
+          format: float
+          nullable: true
+        speed:
+          type: number
+          format: float
+          nullable: true
+        heading:
+          type: number
+          format: float
+          nullable: true
+        source:
+          $ref: '#/components/schemas/PingSource'
+        synced_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    SOSEvent:
+      type: object
+      required: [id, trip_id, user_id, lat, lng, triggered_at, delivery_method, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        trip_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        triggered_at:
+          type: string
+          format: date-time
+        delivery_method:
+          $ref: '#/components/schemas/DeliveryMethod'
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+        resolved_by:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    TrustedContact:
+      type: object
+      required: [id, user_id, name, phone, notify_on_sos, notify_on_trip_start, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Amaka Obi
+        phone:
+          type: string
+          example: "+2348012345678"
+        relationship:
+          type: string
+          nullable: true
+          example: Sister
+        notify_on_sos:
+          type: boolean
+          default: true
+        notify_on_trip_start:
+          type: boolean
+          default: false
+        created_at:
+          type: string
+          format: date-time
+
+  # ── Reusable responses ───────────────────────────────────────────────────────
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid Bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Unauthorized
+            code: UNAUTHORIZED
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Resource not found
+            code: NOT_FOUND
+
+    BadRequest:
+      description: Invalid request body or parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: lat and lng are required
+            code: INVALID_INPUT
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: An unexpected error occurred
+            code: INTERNAL_ERROR
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+
+paths:
+
+  # ── Auth (external / Supabase) ───────────────────────────────────────────────
+
+  /auth/signup:
+    post:
+      tags: [auth]
+      summary: Sign up a new user
+      description: |
+        Handled directly by Supabase Auth. The mobile app calls
+        `supabase.auth.signUp()` — this endpoint is documented for reference only
+        and is NOT served by the Hadin backend.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                full_name:
+                  type: string
+                phone:
+                  type: string
+      responses:
+        '200':
+          description: User created — confirmation email sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                  session:
+                    type: object
+                    nullable: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Sign in an existing user
+      description: |
+        Handled directly by Supabase Auth. The mobile app calls
+        `supabase.auth.signInWithPassword()`. Documented for reference only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                phone:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Authenticated — returns session with access_token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                  session:
+                    type: object
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Trips ────────────────────────────────────────────────────────────────────
+
+  /api/v1/trips:
+    post:
+      tags: [trips]
+      summary: Create a trip
+      description: Creates a new trip record and sets status to `active`.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [origin, destination]
+              properties:
+                title:
+                  type: string
+                  example: Lagos to Abuja
+                origin:
+                  type: string
+                  example: Lagos
+                destination:
+                  type: string
+                  example: Abuja
+                expected_duration_minutes:
+                  type: integer
+                  example: 360
+                started_at:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          description: Trip created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trip'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [trips]
+      summary: List user's trips
+      description: Returns all trips belonging to the authenticated user, newest first.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Filter by trip status
+          schema:
+            $ref: '#/components/schemas/TripStatus'
+      responses:
+        '200':
+          description: List of trips
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Trip'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/trips/{id}:
+    get:
+      tags: [trips]
+      summary: Get a single trip
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Trip detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trip'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    patch:
+      tags: [trips]
+      summary: Update a trip
+      description: Update trip status or ended_at timestamp. Used to mark trips completed or escalate to SOS.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  $ref: '#/components/schemas/TripStatus'
+                ended_at:
+                  type: string
+                  format: date-time
+                title:
+                  type: string
+                expected_duration_minutes:
+                  type: integer
+      responses:
+        '200':
+          description: Updated trip
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trip'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      tags: [trips]
+      summary: Delete a trip
+      description: Permanently deletes a trip and all associated location pings and SOS events.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Trip deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── Location ─────────────────────────────────────────────────────────────────
+
+  /api/v1/location/ping:
+    post:
+      tags: [location]
+      summary: Ingest a single GPS ping
+      description: |
+        Accepts one location ping from the mobile device. The backend converts
+        `{ lat, lng }` to a PostGIS `geography(Point,4326)` before writing to
+        `location_pings`. Broadcasts the update via Supabase Realtime.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tripId, lat, lng, timestamp]
+              properties:
+                tripId:
+                  type: string
+                  format: uuid
+                lat:
+                  type: number
+                  format: double
+                  example: 6.5244
+                lng:
+                  type: number
+                  format: double
+                  example: 3.3792
+                accuracy:
+                  type: number
+                  format: float
+                  nullable: true
+                speed:
+                  type: number
+                  format: float
+                  nullable: true
+                heading:
+                  type: number
+                  format: float
+                  nullable: true
+                source:
+                  $ref: '#/components/schemas/PingSource'
+                timestamp:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          description: Ping stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocationPing'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Trip not found or does not belong to user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/location/batch:
+    post:
+      tags: [location]
+      summary: Ingest a batch of queued pings
+      description: |
+        Used by the mobile app to flush its offline SQLite queue when connectivity
+        is restored. Each ping is processed identically to the single-ping endpoint.
+        Returns per-item success/failure so the client can retry only the failed ones.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pings]
+              properties:
+                pings:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [tripId, lat, lng, timestamp]
+                    properties:
+                      tripId:
+                        type: string
+                        format: uuid
+                      lat:
+                        type: number
+                        format: double
+                      lng:
+                        type: number
+                        format: double
+                      accuracy:
+                        type: number
+                        format: float
+                        nullable: true
+                      speed:
+                        type: number
+                        format: float
+                        nullable: true
+                      heading:
+                        type: number
+                        format: float
+                        nullable: true
+                      source:
+                        $ref: '#/components/schemas/PingSource'
+                      timestamp:
+                        type: string
+                        format: date-time
+      responses:
+        '200':
+          description: Batch result — check `failed` array for any rejected items
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [synced, failed]
+                properties:
+                  synced:
+                    type: integer
+                    example: 12
+                  failed:
+                    type: integer
+                    example: 0
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index:
+                          type: integer
+                        error:
+                          type: string
+                        code:
+                          type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/location/{tripId}:
+    get:
+      tags: [location]
+      summary: Get all pings for a trip
+      description: Returns location pings for the given trip in chronological order. Only returns pings belonging to the authenticated user.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tripId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: since
+          in: query
+          description: Only return pings after this timestamp
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 200
+            maximum: 1000
+      responses:
+        '200':
+          description: List of location pings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LocationPing'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── SOS ──────────────────────────────────────────────────────────────────────
+
+  /api/v1/sos:
+    post:
+      tags: [sos]
+      summary: Trigger an SOS alert
+      description: |
+        Receives an SOS from the mobile device. The backend:
+        1. Verifies the trip belongs to the authenticated user
+        2. Writes an `sos_events` record
+        3. Escalates the trip status to `sos`
+        4. Notifies trusted contacts via push / SMS through Africa's Talking
+        5. Broadcasts via Supabase Realtime for the dashboard
+
+        The mobile app calls this endpoint first; if it fails or is offline it
+        falls back to native SMS via `Linking.openURL('sms:...')`.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tripId, lat, lng, timestamp]
+              properties:
+                tripId:
+                  type: string
+                  format: uuid
+                lat:
+                  type: number
+                  format: double
+                  example: 6.5244
+                lng:
+                  type: number
+                  format: double
+                  example: 3.3792
+                timestamp:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          description: SOS accepted and dispatched
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sosEventId, notified]
+                properties:
+                  sosEventId:
+                    type: string
+                    format: uuid
+                  notified:
+                    type: integer
+                    description: Number of contacts successfully notified
+                    example: 2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Trip not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags: [sos]
+      summary: List user's SOS events
+      description: Returns all SOS events for the authenticated user, newest first.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tripId
+          in: query
+          description: Filter by trip
+          schema:
+            type: string
+            format: uuid
+        - name: resolved
+          in: query
+          description: Filter by resolution status
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: List of SOS events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SOSEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/sos/{id}/resolve:
+    patch:
+      tags: [sos]
+      summary: Mark an SOS event resolved
+      description: Sets `resolved_at` to now and records who resolved it and any notes.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resolved_by:
+                  type: string
+                  example: user
+                notes:
+                  type: string
+                  example: False alarm — reached destination safely.
+      responses:
+        '200':
+          description: SOS event resolved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SOSEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ── Contacts ─────────────────────────────────────────────────────────────────
+
+  /api/v1/contacts:
+    get:
+      tags: [contacts]
+      summary: List trusted contacts
+      description: Returns all trusted contacts for the authenticated user.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of trusted contacts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TrustedContact'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags: [contacts]
+      summary: Add a trusted contact
+      description: Adds a new contact who will be notified on SOS or trip start events.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, phone]
+              properties:
+                name:
+                  type: string
+                  example: Amaka Obi
+                phone:
+                  type: string
+                  example: "+2348012345678"
+                relationship:
+                  type: string
+                  example: Sister
+                notify_on_sos:
+                  type: boolean
+                  default: true
+                notify_on_trip_start:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Contact created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrustedContact'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/contacts/{id}:
+    delete:
+      tags: [contacts]
+      summary: Remove a trusted contact
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Contact removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
