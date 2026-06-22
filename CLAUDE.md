@@ -23,7 +23,7 @@ Streams live location to a web dashboard for responders.
 ## Git workflow — always follow this
 - Every new service, feature, or screen gets its own branch off `main`
 - Branch naming: `feature/<service-name>` e.g. `feature/location-service`
-- When work is complete, merge back into `main` and delete the feature branch
+- When work is complete, merge back into `main` — do NOT delete the feature branch
 - Never commit directly to `main`
 - Commit messages must describe the why, not just the what
 
