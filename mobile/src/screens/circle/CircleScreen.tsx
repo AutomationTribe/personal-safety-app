@@ -124,11 +124,12 @@ const CircleScreen = () => {
     showToast(`${contact.name} updated`);
   };
 
-  const handleContactDeleted = async (contact: TrustedContact) => {
+  const handleContactDeleted = async (contactId: string) => {
+    const name = contacts.find((c) => c.id === contactId)?.name ?? 'Contact';
     setShowDeleteSheet(false);
     setSelectedContact(null);
     await reload();
-    showToast(`${contact.name} removed from your circle`);
+    showToast(`${name} removed from your circle`);
   };
 
   const openEdit = (contact: TrustedContact) => {
@@ -297,7 +298,7 @@ const CircleScreen = () => {
           visible={showEditModal}
           contact={selectedContact}
           onClose={() => { setShowEditModal(false); setSelectedContact(null); }}
-          onSaved={handleContactUpdated}
+          onUpdated={handleContactUpdated}
         />
       )}
 
