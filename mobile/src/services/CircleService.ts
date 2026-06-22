@@ -124,6 +124,7 @@ export async function addContact(data: NewContact): Promise<ContactResult> {
     if (!user) return { data: null, error: 'Not authenticated.' };
 
     const insert = {
+      user_id: user.id,
       name: normalised.name.trim(),
       phone: normalised.phone,
       ...(normalised.email?.trim() ? { email: normalised.email.trim() } : {}),
