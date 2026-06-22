@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "Hadin",
+    "slug": "hadin-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0E1116"
+    },
+    "android": {
+      "package": "app.hadin.mobile"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "ae63969f-ff67-412f-971b-af62f3659793"
+      }
+    }
+  }
+}
