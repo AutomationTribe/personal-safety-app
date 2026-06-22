@@ -10,6 +10,9 @@ import {
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { AppStackParamList } from '../../navigation/AppNavigator';
 import { supabase } from '../../lib/supabase';
 import { useNetworkStatus } from '../../hooks/useNetworkStatus';
 import { startTracking, stopTracking, getLastPing, LocationPing } from '../../services/LocationService';
@@ -78,6 +81,7 @@ function coordLabel(lat: number, lng: number): string {
 const SOS_HOLD_MS = 3000;
 
 const HomeScreen = () => {
+  const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
   const { isOnline } = useNetworkStatus();
 
   const [userName, setUserName] = useState('');
@@ -275,6 +279,7 @@ const HomeScreen = () => {
       onSOSPressIn={handleSOSPressIn}
       onSOSPressOut={handleSOSPressOut}
       onEndTrip={handleEndTrip}
+      onNavigateToCircle={() => navigation.navigate('Circle')}
     />;
   }
 
@@ -284,6 +289,7 @@ const HomeScreen = () => {
     recentTrips={recentTrips}
     contacts={contacts}
     onStartTrip={handleStartTrip}
+    onNavigateToCircle={() => navigation.navigate('Circle')}
   />;
 };
 
@@ -295,9 +301,10 @@ interface IdleViewProps {
   recentTrips: Trip[];
   contacts: Contact[];
   onStartTrip: () => void;
+  onNavigateToCircle: () => void;
 }
 
-const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip }: IdleViewProps) => {
+const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip, onNavigateToCircle }: IdleViewProps) => {
   const insets = useSafeAreaInsets();
   return (
   <View style={styles.idleRoot}>
@@ -385,10 +392,10 @@ const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip }: Id
             </View>
           ))
         )}
-        <View style={styles.addContactRow}>
+        <Pressable style={styles.addContactRow} onPress={onNavigateToCircle}>
           <Feather name="plus-circle" size={16} color={colors.brand.primary} />
           <Text style={styles.addContactText}>Add a trusted contact</Text>
-        </View>
+        </Pressable>
       </View>
     </ScrollView>
 
@@ -396,7 +403,7 @@ const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip }: Id
     <View style={[styles.tabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
       <TabBarItem icon="home" label="Home" active />
       <TabBarItem icon="map" label="Routes" />
-      <TabBarItem icon="users" label="Circle" />
+      <TabBarItem icon="users" label="Circle" onPress={onNavigateToCircle} />
       <TabBarItem icon="settings" label="Settings" />
     </View>
   </View>
@@ -415,6 +422,7 @@ interface ActiveTripViewProps {
   onSOSPressIn: () => void;
   onSOSPressOut: () => void;
   onEndTrip: () => void;
+  onNavigateToCircle: () => void;
 }
 
 const ActiveTripView = ({
@@ -427,6 +435,7 @@ const ActiveTripView = ({
   onSOSPressIn,
   onSOSPressOut,
   onEndTrip,
+  onNavigateToCircle,
 }: ActiveTripViewProps) => {
   const sosBarWidth = sosProgress.interpolate({
     inputRange: [0, 1],
@@ -528,7 +537,7 @@ const ActiveTripView = ({
       <View style={[styles.darkTabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
         <TabBarItem icon="home" label="Home" active dark />
         <TabBarItem icon="map" label="Routes" dark />
-        <TabBarItem icon="users" label="Circle" dark />
+        <TabBarItem icon="users" label="Circle" dark onPress={onNavigateToCircle} />
         <TabBarItem icon="settings" label="Settings" dark />
       </View>
     </View>
@@ -542,10 +551,11 @@ interface TabBarItemProps {
   label: string;
   active?: boolean;
   dark?: boolean;
+  onPress?: () => void;
 }
 
-const TabBarItem = ({ icon, label, active = false, dark = false }: TabBarItemProps) => (
-  <View style={styles.tabItem}>
+const TabBarItem = ({ icon, label, active = false, dark = false, onPress }: TabBarItemProps) => (
+  <Pressable style={styles.tabItem} onPress={onPress}>
     <Feather
       name={icon}
       size={22}
@@ -555,6 +565,7 @@ const TabBarItem = ({ icon, label, active = false, dark = false }: TabBarItemPro
           : dark ? 'rgba(255,255,255,0.35)' : colors.brand.textSecondary
       }
     />
+    {active && <View style={[styles.tabActiveLine, dark && styles.tabActiveLineDark]} />}
     <Text style={[
       styles.tabLabel,
       active && (dark ? styles.tabLabelActiveDark : styles.tabLabelActive),
@@ -562,7 +573,7 @@ const TabBarItem = ({ icon, label, active = false, dark = false }: TabBarItemPro
     ]}>
       {label}
     </Text>
-  </View>
+  </Pressable>
 );
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
@@ -906,6 +917,16 @@ const styles = StyleSheet.create({
 
   // Shared tab items
   tabItem: { flex: 1, alignItems: 'center', gap: 3 },
+  tabActiveLine: {
+    width: 20,
+    height: 2,
+    backgroundColor: colors.brand.primary,
+    borderRadius: 2,
+    marginTop: -2,
+  },
+  tabActiveLineDark: {
+    backgroundColor: colors.brand.mid,
+  },
   tabLabel: { fontSize: fontSizes.small, color: colors.brand.textSecondary },
   tabLabelActive: { color: colors.brand.primary, fontWeight: '600' },
   tabLabelActiveDark: { color: colors.brand.mid, fontWeight: '600' },
