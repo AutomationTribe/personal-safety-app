@@ -207,6 +207,34 @@ export async function getQueuedPings(): Promise<LocationPing[]> {
   }));
 }
 
+export async function getLastPing(): Promise<LocationPing | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{
+    trip_id: string;
+    lat: number;
+    lng: number;
+    accuracy: number | null;
+    speed: number | null;
+    heading: number | null;
+    timestamp: string;
+    source: string;
+    synced: number;
+  }>(`SELECT * FROM location_pings_queue ORDER BY timestamp DESC LIMIT 1`);
+
+  if (!row) return null;
+  return {
+    tripId: row.trip_id,
+    lat: row.lat,
+    lng: row.lng,
+    accuracy: row.accuracy,
+    speed: row.speed,
+    heading: row.heading,
+    timestamp: row.timestamp,
+    source: row.source as LocationPing['source'],
+    synced: row.synced === 1,
+  };
+}
+
 export async function flushQueue(): Promise<{ synced: number; failed: number }> {
   const db = await getDb();
   const rows = await db.getAllAsync<{

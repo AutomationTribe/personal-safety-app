@@ -13,6 +13,22 @@ export const colors = {
   borderStrong: '#CBD5E1',
   white: '#FFFFFF',
   ink: '#0E1116',
+
+  brand: {
+    primary: '#1A6B4A',
+    mid: '#1D9E75',
+    light: '#EFF9F4',
+    border: '#B8E8D0',
+    bgWarm: '#FAFAF8',
+    bgSurface: '#F4F3EF',
+    bgCard: '#FFFFFF',
+    textPrimary: '#1A1A1A',
+    textSecondary: '#9C9A92',
+    darkBase: '#0E1F17',
+    darkCard: '#142C1F',
+    darkNav: '#0A1A11',
+    sos: '#C0392B',
+  },
 };
 
 export const fontSizes = {
