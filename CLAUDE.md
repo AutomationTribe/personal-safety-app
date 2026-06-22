@@ -1,8 +1,3 @@
-Write the following content exactly into CLAUDE.md, replacing 
-whatever placeholder is there:
-
----
-
 # Travel Safety App
 
 ## What this app does
@@ -24,6 +19,13 @@ Streams live location to a web dashboard for responders.
 - SOS fires immediately regardless of poll interval
 - If internet fails during SOS, fall back to native device SMS automatically
 - Never assume connectivity — always check before any network call
+
+## Git workflow — always follow this
+- Every new service, feature, or screen gets its own branch off `main`
+- Branch naming: `feature/<service-name>` e.g. `feature/location-service`
+- When work is complete, merge back into `main` and delete the feature branch
+- Never commit directly to `main`
+- Commit messages must describe the why, not just the what
 
 ## Project commands
 - `cd mobile && npx expo start` — run mobile dev server
