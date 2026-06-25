@@ -7,6 +7,8 @@ import LoginScreen from '../screens/auth/LoginScreen';
 import SignupScreen from '../screens/auth/SignupScreen';
 import HomeScreen from '../screens/trip/HomeScreen';
 import CircleScreen from '../screens/circle/CircleScreen';
+import RoutesScreen from '../screens/routes/RoutesScreen';
+import TripDetailScreen from '../screens/routes/TripDetailScreen';
 import { colors } from '../styles/tokens';
 
 export type AuthStackParamList = {
@@ -17,6 +19,8 @@ export type AuthStackParamList = {
 export type AppStackParamList = {
   Home: undefined;
   Circle: undefined;
+  Routes: undefined;
+  TripDetail: { tripId: string };
 };
 
 const AuthStackNav = createNativeStackNavigator<AuthStackParamList>();
@@ -33,6 +37,8 @@ const AppStack = () => (
   <AppStackNav.Navigator screenOptions={{ headerShown: false }}>
     <AppStackNav.Screen name="Home" component={HomeScreen} />
     <AppStackNav.Screen name="Circle" component={CircleScreen} />
+    <AppStackNav.Screen name="Routes" component={RoutesScreen} />
+    <AppStackNav.Screen name="TripDetail" component={TripDetailScreen} />
   </AppStackNav.Navigator>
 );
 
@@ -43,6 +49,7 @@ const AppNavigator = () => {
   useEffect(() => {
     supabase.auth.getSession()
       .then(({ data: { session } }) => {
+     
         setSessionExists(!!session);
       })
       .catch(() => {

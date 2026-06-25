@@ -18,8 +18,16 @@ export interface LocationPing {
 // ── Internal module state ────────────────────────────────────────────────────
 
 let _db: SQLite.SQLiteDatabase | null = null;
-let _trackingInterval: ReturnType<typeof setInterval> | null = null;
+let _trackingSubscription: Location.LocationSubscription | null = null;
 let _activeTripId: string | null = null;
+
+// Stationary detection state
+let _lastPingLat: number | null = null;
+let _lastPingLng: number | null = null;
+let _consecutiveStationaryCount = 0;
+let _isStationary = false;
+let _pingCount = 0;
+let _skipNextPing = false;
 
 // ── DB helpers ───────────────────────────────────────────────────────────────
 
@@ -96,19 +104,71 @@ async function syncPingToSupabase(ping: LocationPing): Promise<boolean> {
   }
 }
 
+// ── Stationary detection ─────────────────────────────────────────────────────
+
+function haversineMetres(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6_371_000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function updateStationaryState(lat: number, lng: number): void {
+  if (_lastPingLat !== null && _lastPingLng !== null) {
+    const dist = haversineMetres(_lastPingLat, _lastPingLng, lat, lng);
+    if (dist < 100) {
+      _consecutiveStationaryCount++;
+      if (_consecutiveStationaryCount >= 2) _isStationary = true;
+    } else {
+      _consecutiveStationaryCount = 0;
+      _isStationary = false;
+    }
+  }
+  _lastPingLat = lat;
+  _lastPingLng = lng;
+}
+
+export function getIsStationary(): boolean {
+  return _isStationary;
+}
+
 // ── Core logic ───────────────────────────────────────────────────────────────
 
 async function captureAndQueue(): Promise<void> {
   if (!_activeTripId) return;
 
+  // When stationary, skip alternate pings to double effective interval
+  if (_isStationary) {
+    _skipNextPing = !_skipNextPing;
+    if (_skipNextPing) return;
+  }
+
+  _pingCount++;
+
   const position = await Location.getCurrentPositionAsync({
     accuracy: Location.Accuracy.Balanced,
   });
 
+  const { latitude: lat, longitude: lng } = position.coords;
+  updateStationaryState(lat, lng);
+
+  const queued = await (await getDb()).getAllAsync<{ id: number }>(
+    `SELECT id FROM location_pings_queue WHERE synced = 0`,
+  );
+
+  if (__DEV__) {
+    console.log(
+      `[LocationService] Ping #${_pingCount} | accuracy: ${position.coords.accuracy?.toFixed(0)}m | stationary: ${_isStationary} | queued: ${queued.length} | battery-mode: balanced`,
+    );
+  }
+
   const ping: LocationPing = {
     tripId: _activeTripId,
-    lat: position.coords.latitude,
-    lng: position.coords.longitude,
+    lat,
+    lng,
     accuracy: position.coords.accuracy,
     speed: position.coords.speed,
     heading: position.coords.heading,
@@ -139,25 +199,56 @@ async function captureAndQueue(): Promise<void> {
 // ── Public API ───────────────────────────────────────────────────────────────
 
 export async function startTracking(tripId: string, intervalMinutes: number): Promise<void> {
-  if (_trackingInterval) {
+  // NOTE: True background location requires a dev build (not Expo Go)
+  // expo-task-manager + expo-background-fetch handles the 30-min
+  // heartbeat. Foreground tracking works in Expo Go.
+  // Switch to dev build (eas build --profile development) for
+  // full background support in Phase 6.
+  if (_trackingSubscription) {
     console.warn('[LocationService] Already tracking. Call stopTracking() first.');
     return;
   }
 
   await ensurePermission();
   _activeTripId = tripId;
+  _pingCount = 0;
+  _lastPingLat = null;
+  _lastPingLng = null;
+  _consecutiveStationaryCount = 0;
+  _isStationary = false;
+  _skipNextPing = false;
 
-  // Capture immediately, then on each interval
+  // Capture immediately on start
   await captureAndQueue();
-  _trackingInterval = setInterval(captureAndQueue, intervalMinutes * 60 * 1000);
+
+  // Use watchPositionAsync with combined time + distance trigger.
+  // distanceInterval: 500 prevents pings when the traveller is stationary
+  // (stopped at a checkpoint, sleeping in the bus).
+  // Accuracy.Balanced uses cell tower + WiFi triangulation — far less
+  // battery drain than pure GPS (Accuracy.High).
+  _trackingSubscription = await Location.watchPositionAsync(
+    {
+      accuracy: Location.Accuracy.Balanced,
+      timeInterval: intervalMinutes * 60 * 1000,
+      distanceInterval: 500,
+    },
+    async () => {
+      await captureAndQueue();
+    },
+  );
 }
 
 export async function stopTracking(): Promise<void> {
-  if (_trackingInterval) {
-    clearInterval(_trackingInterval);
-    _trackingInterval = null;
+  if (_trackingSubscription) {
+    _trackingSubscription.remove();
+    _trackingSubscription = null;
   }
   _activeTripId = null;
+  _lastPingLat = null;
+  _lastPingLng = null;
+  _consecutiveStationaryCount = 0;
+  _isStationary = false;
+  _skipNextPing = false;
 }
 
 export async function getCurrentLocation(): Promise<LocationPing> {

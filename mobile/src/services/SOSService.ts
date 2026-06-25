@@ -1,232 +1,219 @@
+import * as Location from 'expo-location';
 import { Linking } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../lib/supabase';
-import { getCurrentLocation } from './LocationService';
 import { checkIsOnline } from '../hooks/useNetworkStatus';
 
 export interface SOSResult {
   success: boolean;
-  method: 'internet' | 'sms' | 'both' | 'failed';
+  eventId?: string;
+  notified: number;
+  total: number;
   error?: string;
 }
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3001';
-const CONTACTS_CACHE_KEY = 'HADIN_TRUSTED_CONTACTS_CACHE';
-
-// ── Trusted contacts cache ───────────────────────────────────────────────────
-
-interface CachedContact {
-  phone: string;
+export interface SOSContact {
+  id: string;
   name: string;
+  phone: string;
 }
 
-async function fetchContactsFromSupabase(): Promise<CachedContact[]> {
-  const { data, error } = await supabase
-    .from('trusted_contacts')
-    .select('phone, name')
-    .eq('notify_on_sos', true);
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3001';
+const CONTACTS_CACHE_KEY = 'HADIN_SOS_CONTACTS_CACHE';
 
-  if (error || !data) return [];
-  return data as CachedContact[];
-}
+// ── Contact cache ─────────────────────────────────────────────────────────────
+// Written whenever getSOSContacts succeeds so the SMS fallback has phones offline.
 
-async function getCachedContacts(): Promise<CachedContact[]> {
+async function readContactCache(): Promise<SOSContact[]> {
   try {
     const raw = await AsyncStorage.getItem(CONTACTS_CACHE_KEY);
-    if (!raw) return [];
-    return JSON.parse(raw) as CachedContact[];
+    return raw ? (JSON.parse(raw) as SOSContact[]) : [];
   } catch {
     return [];
   }
 }
 
-async function cacheContacts(contacts: CachedContact[]): Promise<void> {
+async function writeContactCache(contacts: SOSContact[]): Promise<void> {
   try {
     await AsyncStorage.setItem(CONTACTS_CACHE_KEY, JSON.stringify(contacts));
   } catch {
-    // Cache write failure is non-fatal
+    // non-fatal
   }
 }
 
-// ── SMS fallback ─────────────────────────────────────────────────────────────
+// ── SMS fallback ──────────────────────────────────────────────────────────────
 
-function buildSMSBody(userId: string, lat: number, lng: number, timestamp: string): string {
-  return `SOS ${userId} ${lat},${lng} ${timestamp}`;
-}
-
-async function sendSMSFallback(
-  phones: string[],
-  userId: string,
-  lat: number,
-  lng: number,
-  timestamp: string,
-): Promise<boolean> {
-  if (phones.length === 0) return false;
-
-  const body = buildSMSBody(userId, lat, lng, timestamp);
-  // sms: URI with multiple recipients uses semicolons on Android, commas on iOS —
-  // React Native Linking normalises this well enough for both platforms.
-  const recipients = phones.join(';');
-  const url = `sms:${recipients}?body=${encodeURIComponent(body)}`;
-
+async function openSMSFallback(phones: string[], lat: number, lng: number): Promise<void> {
+  if (phones.length === 0) return;
+  const body = `\u{1F6A8} SOS: I need help. My location: https://maps.google.com/?q=${lat},${lng} — Hadin Safety App`;
+  // Semicolon-separated recipients work on both Android and iOS via Linking
+  const url = `sms:${phones.join(';')}?body=${encodeURIComponent(body)}`;
   const supported = await Linking.canOpenURL(url);
-  if (!supported) return false;
-
-  await Linking.openURL(url);
-  return true;
-}
-
-// ── Internet POST ─────────────────────────────────────────────────────────────
-
-async function postSOSToBackend(
-  tripId: string,
-  lat: number,
-  lng: number,
-  timestamp: string,
-): Promise<boolean> {
-  try {
-    const { data: { session } } = await supabase.auth.getSession();
-    const token = session?.access_token;
-
-    const response = await fetch(`${BACKEND_URL}/api/v1/sos`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({ tripId, lat, lng, timestamp }),
-    });
-
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-// ── Supabase sos_events record ────────────────────────────────────────────────
-
-async function writeSOSEvent(
-  tripId: string,
-  lat: number,
-  lng: number,
-  timestamp: string,
-  deliveryMethod: 'internet' | 'sms' | 'both',
-): Promise<string | null> {
-  try {
-    const { data, error } = await supabase
-      .from('sos_events')
-      .insert({
-        trip_id: tripId,
-        coords: `POINT(${lng} ${lat})`,
-        triggered_at: timestamp,
-        delivery_method: deliveryMethod,
-      })
-      .select('id')
-      .single();
-
-    if (error || !data) return null;
-    return (data as { id: string }).id;
-  } catch {
-    return null;
-  }
+  if (supported) await Linking.openURL(url);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-export async function getSMSFallbackContacts(): Promise<string[]> {
-  const online = await checkIsOnline();
+/**
+ * Fetch contacts for a trip from Supabase and cache them for offline SMS fallback.
+ * Returns contacts that have notify_on_sos = true.
+ */
+export async function getSOSContacts(tripId: string): Promise<SOSContact[]> {
+  const { data: trip, error: tripError } = await supabase
+    .from('trips')
+    .select('contact_ids')
+    .eq('id', tripId)
+    .single();
 
-  if (online) {
-    const contacts = await fetchContactsFromSupabase();
-    if (contacts.length > 0) {
-      await cacheContacts(contacts);
-      return contacts.map((c) => c.phone);
+  if (tripError || !trip) return [];
+
+  const contactIds = (trip as { contact_ids: string[] }).contact_ids ?? [];
+  if (contactIds.length === 0) return [];
+
+  const { data: rows, error: contactError } = await supabase
+    .from('trusted_contacts')
+    .select('id, name, phone')
+    .in('id', contactIds)
+    .eq('notify_on_sos', true);
+
+  if (contactError || !rows) return [];
+
+  const contacts = rows as SOSContact[];
+  await writeContactCache(contacts);
+  return contacts;
+}
+
+/**
+ * Trigger an SOS alert.
+ *
+ * 1. Acquires GPS at Accuracy.High.
+ * 2. POSTs to the backend (which inserts the event and sends SMS via AT).
+ * 3. Falls back to opening the native SMS app if the backend is unreachable
+ *    or returns a non-OK status (including 429 rate limit).
+ *
+ * Never throws — always returns SOSResult.
+ */
+export async function triggerSOS(
+  tripId: string,
+  contactIds: string[],
+): Promise<SOSResult> {
+  // 1. GPS at Accuracy.High — non-negotiable for SOS
+  let lat: number;
+  let lng: number;
+
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      console.error('[SOS] Location permission denied');
+      return { success: false, notified: 0, total: contactIds.length, error: 'Location permission denied' };
+    }
+    const position = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.High,
+    });
+    lat = position.coords.latitude;
+    lng = position.coords.longitude;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[SOS] GPS failed:', msg);
+    return { success: false, notified: 0, total: contactIds.length, error: 'Could not obtain GPS location' };
+  }
+
+  console.log(`[SOS] Triggered | trip=${tripId} lat=${lat} lng=${lng} contacts=${contactIds.length}`);
+
+  // 2. Get JWT
+  const { data: sessionData } = await supabase.auth.getSession().catch(() => ({
+    data: { session: null },
+  }));
+  const token = sessionData.session?.access_token;
+
+  // 3. Internet path
+  try {
+    const online = await checkIsOnline();
+
+    if (online && token) {
+      const response = await fetch(`${BACKEND_URL}/api/v1/sos`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ tripId, lat, lng, contactIds }),
+      });
+
+      if (response.ok) {
+        const body = (await response.json()) as {
+          success: boolean;
+          eventId?: string;
+          notified: number;
+          total: number;
+        };
+        console.log(`[SOS] Backend OK | eventId=${body.eventId} notified=${body.notified}/${body.total}`);
+        return { success: true, eventId: body.eventId, notified: body.notified, total: body.total };
+      }
+
+      // 429 rate limit or other non-OK → SMS fallback
+      console.warn(`[SOS] Backend returned ${response.status} — SMS fallback`);
+    }
+  } catch (err) {
+    console.warn('[SOS] Backend unreachable — SMS fallback:', err instanceof Error ? err.message : String(err));
+  }
+
+  // 4. SMS fallback — use cache, try a fresh fetch if cache is empty
+  let fallbackContacts = await readContactCache();
+  if (fallbackContacts.length === 0) {
+    try {
+      fallbackContacts = await getSOSContacts(tripId);
+    } catch {
+      // getSOSContacts already handles errors gracefully
     }
   }
 
-  // Fall back to cache when offline or Supabase returned nothing
-  const cached = await getCachedContacts();
-  return cached.map((c) => c.phone);
-}
+  const phones = fallbackContacts.map((c) => c.phone);
+  await openSMSFallback(phones, lat, lng);
 
-export async function triggerSOS(tripId: string): Promise<SOSResult> {
-  // 1. Capture location immediately — never wait for next poll
-  let lat: number;
-  let lng: number;
-  let timestamp: string;
-
-  try {
-    const loc = await getCurrentLocation();
-    lat = loc.lat;
-    lng = loc.lng;
-    timestamp = loc.timestamp;
-  } catch (err) {
-    return {
-      success: false,
-      method: 'failed',
-      error: 'Could not obtain GPS location.',
-    };
-  }
-
-  // 2. Get current user id for SMS body
-  const { data: { session } } = await supabase.auth.getSession().catch(() => ({
-    data: { session: null },
-  }));
-  const userId = session?.user.id ?? 'unknown';
-
-  // 3. Check connectivity
-  const online = await checkIsOnline();
-
-  let internetOk = false;
-  let smsOk = false;
-
-  if (online) {
-    internetOk = await postSOSToBackend(tripId, lat, lng, timestamp);
-  }
-
-  // 4. SMS fallback if offline or internet POST failed
-  if (!internetOk) {
-    const phones = await getSMSFallbackContacts();
-    smsOk = await sendSMSFallback(phones, userId, lat, lng, timestamp);
-  }
-
-  // 5. Determine delivery method
-  const deliveryMethod: 'internet' | 'sms' | 'both' | 'failed' =
-    internetOk && smsOk ? 'both'
-    : internetOk        ? 'internet'
-    : smsOk             ? 'sms'
-    : 'failed';
-
-  const success = deliveryMethod !== 'failed';
-
-  // 6. Write sos_events record (best-effort — don't block on failure)
-  if (success && online) {
-    await writeSOSEvent(
-      tripId,
-      lat,
-      lng,
-      timestamp,
-      deliveryMethod === 'both' ? 'both' : internetOk ? 'internet' : 'sms',
-    );
-  }
-
+  console.log(`[SOS] SMS fallback opened | phones=${phones.length}`);
   return {
-    success,
-    method: deliveryMethod,
-    ...(!success ? { error: 'Could not deliver SOS via internet or SMS.' } : {}),
+    success: false,
+    notified: 0,
+    total: Math.max(contactIds.length, phones.length),
   };
 }
 
-export async function cancelSOS(sosEventId: string): Promise<void> {
-  const { error } = await supabase
-    .from('sos_events')
-    .update({
-      resolved_at: new Date().toISOString(),
-      resolved_by: 'user',
-    })
-    .eq('id', sosEventId);
+/**
+ * Cancel an active SOS via the backend PATCH endpoint.
+ * Does not throw — returns success/error shape.
+ */
+export async function cancelSOS(
+  eventId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const { data: sessionData } = await supabase.auth.getSession().catch(() => ({
+    data: { session: null },
+  }));
+  const token = sessionData.session?.access_token;
 
-  if (error) {
-    throw new Error(`Failed to cancel SOS event: ${error.message}`);
+  if (!token) {
+    return { success: false, error: 'Not authenticated' };
+  }
+
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/v1/sos/${eventId}/cancel`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (response.ok) {
+      console.log(`[SOS] Cancelled | eventId=${eventId}`);
+      return { success: true };
+    }
+
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    return { success: false, error: body.error ?? `HTTP ${response.status}` };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[SOS] Cancel failed for ${eventId}:`, msg);
+    return { success: false, error: msg };
   }
 }

@@ -10,6 +10,8 @@ import {
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import {
   TrustedContact,
   getContacts,
@@ -20,6 +22,7 @@ import AddContactModal from './AddContactModal';
 import EditContactModal from './EditContactModal';
 import DeleteContactSheet from './DeleteContactSheet';
 import { colors, fontSizes, spacing } from '../../styles/tokens';
+import { AppStackParamList } from '../../navigation/AppNavigator';
 
 // ── Avatar palette ─────────────────────────────────────────────────────────────
 
@@ -60,6 +63,7 @@ interface ToastState {
 
 const CircleScreen = () => {
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
 
   const [contacts, setContacts] = useState<TrustedContact[]>([]);
   const [filtered, setFiltered] = useState<TrustedContact[]>([]);
@@ -278,10 +282,10 @@ const CircleScreen = () => {
 
       {/* ── Bottom tab bar ── */}
       <View style={[styles.tabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
-        <TabItem icon="home" label="Home" />
-        <TabItem icon="map" label="Routes" />
+        <TabItem icon="home" label="Home" onPress={() => navigation.navigate('Home')} />
+        <TabItem icon="map" label="Routes" onPress={() => navigation.navigate('Home')} />
         <TabItem icon="users" label="Circle" active />
-        <TabItem icon="settings" label="Settings" />
+        <TabItem icon="settings" label="Settings" onPress={() => navigation.navigate('Home')} />
       </View>
 
       {/* ── Modals ── */}
@@ -362,10 +366,11 @@ interface TabItemProps {
   icon: React.ComponentProps<typeof Feather>['name'];
   label: string;
   active?: boolean;
+  onPress?: () => void;
 }
 
-const TabItem = ({ icon, label, active = false }: TabItemProps) => (
-  <View style={styles.tabItem}>
+const TabItem = ({ icon, label, active = false, onPress }: TabItemProps) => (
+  <Pressable style={styles.tabItem} onPress={onPress} disabled={active}>
     <Feather
       name={icon}
       size={22}
@@ -373,7 +378,7 @@ const TabItem = ({ icon, label, active = false }: TabItemProps) => (
     />
     <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text>
     {active && <View style={styles.tabActiveDot} />}
-  </View>
+  </Pressable>
 );
 
 // ── Styles ─────────────────────────────────────────────────────────────────────

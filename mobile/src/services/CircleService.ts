@@ -145,7 +145,11 @@ export async function addContact(data: NewContact): Promise<ContactResult> {
     const userName: string = (user.user_metadata as { full_name?: string })?.full_name ?? user.email ?? '';
 
     // Fire-and-forget — do not await, do not surface failure to caller
-    notifyContactViaSMS(contact, userName).catch(() => {});
+    notifyContactViaSMS(contact, userName).catch((err) => {
+      if (__DEV__) {
+        console.warn('[CircleService] notifyContactViaSMS failed — is backend running?', err);
+      }
+    });
 
     return { data: contact, error: null };
   } catch (err) {
@@ -243,12 +247,26 @@ export async function notifyContactViaSMS(
   contact: TrustedContact,
   userName: string,
 ): Promise<void> {
+  if (__DEV__) {
+    console.log('[CircleService] Sending circle notification to', contact.phone);
+  }
+
   const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3001';
 
+  if (__DEV__) {
+    console.log('[CircleService] Hitting backend at:', backendUrl);
+  }
+
   try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token ?? '';
+
     const res = await fetch(`${backendUrl}/api/v1/contacts/notify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
       body: JSON.stringify({
         contactPhone: contact.phone,
         contactName: contact.name,

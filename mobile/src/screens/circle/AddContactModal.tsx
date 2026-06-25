@@ -3,7 +3,6 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -133,12 +132,11 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
       onRequestClose={onClose}
       statusBarTranslucent
     >
-      <View style={styles.overlay}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={styles.kavWrapper}
-        >
-          <Pressable style={styles.dismissArea} onPress={onClose} />
+      <KeyboardAvoidingView
+        style={styles.overlay}
+        behavior="padding"
+      >
+        <Pressable style={styles.dismissArea} onPress={onClose} />
           <View style={styles.sheet}>
             {/* Handle */}
             <View style={styles.handleRow}>
@@ -327,8 +325,7 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
               </Pressable>
             </ScrollView>
           </View>
-        </KeyboardAvoidingView>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 };
@@ -339,9 +336,6 @@ const styles = StyleSheet.create({
   overlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.45)',
-    justifyContent: 'flex-end',
-  },
-  kavWrapper: {
     justifyContent: 'flex-end',
   },
   dismissArea: {
