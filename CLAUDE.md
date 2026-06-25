@@ -20,6 +20,29 @@ Streams live location to a web dashboard for responders.
 - If internet fails during SOS, fall back to native device SMS automatically
 - Never assume connectivity — always check before any network call
 
+## Battery-first rules — never break these
+- GPS lock is ALWAYS released between pings — never hold continuous lock
+- Use Accuracy.Balanced for interval pings, Accuracy.High for SOS only
+- Skip pings when device is stationary (moved <100m from last ping)
+- Double the ping interval after 2 consecutive stationary readings
+- Never run background tasks more frequently than needed
+- A dead phone cannot send SOS — battery life IS the safety feature
+
+## Prompt files
+All Claude Code build prompts live in .claude/prompts/
+Run in this order: migrations → services → screens → backend
+
+Folder structure:
+  .claude/prompts/services/    — service layer prompts
+  .claude/prompts/screens/     — screen and component prompts
+  .claude/prompts/migrations/  — Supabase SQL migration prompts
+  .claude/prompts/backend/     — Node/Express route prompts
+  .claude/prompts/fixes/       — bug fix prompts
+
+Naming convention: NN-FileName.md (number prefix = run order)
+Never run a screen prompt before its service prompt completes.
+Never run a service prompt before migrations are applied.
+
 ## Git workflow — always follow this
 - Every new service, feature, or screen gets its own branch off `main`
 - Branch naming: `feature/<service-name>` e.g. `feature/location-service`
@@ -57,3 +80,8 @@ Streams live location to a web dashboard for responders.
 - `backend/src/services/deviationEngine.ts` — trip change detection
 - `dashboard/src/components/LiveMap.tsx` — real-time map view
 - `dashboard/src/components/AlertQueue.tsx` — SOS alert management
+
+## Battery-sensitive files — review before changing
+- mobile/src/services/LocationService.ts — GPS strategy
+- mobile/src/hooks/useNetworkStatus.ts — avoid polling
+- Any background task registration

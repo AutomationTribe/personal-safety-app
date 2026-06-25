@@ -13,8 +13,6 @@ const at = AfricasTalking({
 });
 
 const sms = at.SMS;
-// Sandbox does not support custom sender IDs — use undefined to let AT pick the default
-const SENDER_ID = isDev ? undefined : (process.env.AT_SENDER_ID ?? 'HADIN');
 
 export interface SMSResult {
   success: boolean;
@@ -26,7 +24,6 @@ export async function sendSMS(to: string, message: string): Promise<SMSResult> {
     const result = await sms.send({
       to: [to],
       message,
-      ...(SENDER_ID ? { from: SENDER_ID } : {}),
     }) as { SMSMessageData?: { Recipients?: Array<{ status: string; statusCode: number }> } };
 
     const recipient = result?.SMSMessageData?.Recipients?.[0];
