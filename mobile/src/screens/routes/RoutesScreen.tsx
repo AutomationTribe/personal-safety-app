@@ -592,7 +592,7 @@ const RoutesScreen = () => {
         <NavItem icon="home"     label="Home"     onPress={() => navigation.navigate('Home')} />
         <NavItem icon="map"      label="Routes"   active />
         <NavItem icon="users"    label="Circle"   onPress={() => navigation.navigate('Circle')} />
-        <NavItem icon="settings" label="Settings" />
+        <NavItem icon="settings" label="Settings" onPress={() => navigation.navigate('Settings')} />
       </View>
 
       {/* ── Select mode toolbar (covers header) ────────────────────────────── */}

@@ -283,9 +283,9 @@ const CircleScreen = () => {
       {/* ── Bottom tab bar ── */}
       <View style={[styles.tabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
         <TabItem icon="home" label="Home" onPress={() => navigation.navigate('Home')} />
-        <TabItem icon="map" label="Routes" onPress={() => navigation.navigate('Home')} />
+        <TabItem icon="map" label="Routes" onPress={() => navigation.navigate('Routes')} />
         <TabItem icon="users" label="Circle" active />
-        <TabItem icon="settings" label="Settings" onPress={() => navigation.navigate('Home')} />
+        <TabItem icon="settings" label="Settings" onPress={() => navigation.navigate('Settings')} />
       </View>
 
       {/* ── Modals ── */}

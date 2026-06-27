@@ -303,6 +303,7 @@ const HomeScreen = () => {
           onEndTrip={handleEndTrip}
           onNavigateToCircle={() => navigation.navigate('Circle')}
           onNavigateToRoutes={() => navigation.navigate('Routes')}
+          onNavigateToSettings={() => navigation.navigate('Settings')}
         />
         <EndTripModal
           visible={showEndModal}
@@ -332,6 +333,7 @@ const HomeScreen = () => {
         onStartTrip={handleStartTrip}
         onNavigateToCircle={() => navigation.navigate('Circle')}
         onNavigateToRoutes={() => navigation.navigate('Routes')}
+        onNavigateToSettings={() => navigation.navigate('Settings')}
       />
       <StartTripModal
         visible={showStartModal}
@@ -352,9 +354,10 @@ interface IdleViewProps {
   onStartTrip: () => void;
   onNavigateToCircle: () => void;
   onNavigateToRoutes: () => void;
+  onNavigateToSettings: () => void;
 }
 
-const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip, onNavigateToCircle, onNavigateToRoutes }: IdleViewProps) => {
+const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip, onNavigateToCircle, onNavigateToRoutes, onNavigateToSettings }: IdleViewProps) => {
   const insets = useSafeAreaInsets();
   return (
   <View style={styles.idleRoot}>
@@ -459,7 +462,7 @@ const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip, onNa
       <TabBarItem icon="home" label="Home" active />
       <TabBarItem icon="map" label="Routes" onPress={onNavigateToRoutes} />
       <TabBarItem icon="users" label="Circle" onPress={onNavigateToCircle} />
-      <TabBarItem icon="settings" label="Settings" />
+      <TabBarItem icon="settings" label="Settings" onPress={onNavigateToSettings} />
     </View>
   </View>
   );
@@ -481,6 +484,7 @@ interface ActiveTripViewProps {
   onEndTrip: () => void;
   onNavigateToCircle: () => void;
   onNavigateToRoutes: () => void;
+  onNavigateToSettings: () => void;
 }
 
 const ActiveTripView = ({
@@ -497,6 +501,7 @@ const ActiveTripView = ({
   onEndTrip,
   onNavigateToCircle,
   onNavigateToRoutes,
+  onNavigateToSettings,
 }: ActiveTripViewProps) => {
   const insets = useSafeAreaInsets();
 
@@ -789,7 +794,7 @@ const ActiveTripView = ({
         <TabBarItem icon="home" label="Home" active />
         <TabBarItem icon="map" label="Routes" onPress={onNavigateToRoutes} />
         <TabBarItem icon="users" label="Circle" onPress={onNavigateToCircle} />
-        <TabBarItem icon="settings" label="Settings" />
+        <TabBarItem icon="settings" label="Settings" onPress={onNavigateToSettings} />
       </View>
 
     </View>

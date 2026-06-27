@@ -137,7 +137,7 @@ export async function triggerSOS(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ tripId, lat, lng, contactIds }),
+        body: JSON.stringify({ tripId, lat, lng, timestamp: new Date().toISOString() }),
       });
 
       if (response.ok) {

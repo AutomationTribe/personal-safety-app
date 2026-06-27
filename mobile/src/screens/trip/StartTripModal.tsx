@@ -120,6 +120,7 @@ const StartTripModal = ({ visible, onClose, onTripStarted }: Props) => {
           started_at: new Date().toISOString(),
           expected_stops: expectedStops,
           max_stop_duration_minutes: maxStopMinutes,
+          contact_ids: Array.from(selectedIds),
         })
         .select()
         .single();
