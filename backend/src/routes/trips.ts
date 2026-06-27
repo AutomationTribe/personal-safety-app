@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase';
-import { sendSMS } from '../services/notificationService';
+import { sendSMS } from '../services/africastalking';
 
 const router = Router();
 
