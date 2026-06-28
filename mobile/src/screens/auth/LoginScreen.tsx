@@ -16,6 +16,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { supabase } from '../../lib/supabase';
+import { signInWithGoogle } from '../../services/GoogleAuthService';
 import { colors, fontSizes, spacing } from '../../styles/tokens';
 import { AuthStackParamList } from '../../navigation/AppNavigator';
 
@@ -32,6 +33,7 @@ const LoginScreen = ({ navigation }: Props) => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const [authError, setAuthError] = useState('');
 
   useEffect(() => {
@@ -64,6 +66,22 @@ const LoginScreen = ({ navigation }: Props) => {
     }
 
     AsyncStorage.setItem(LAST_IDENTIFIER_KEY, identifier.trim()).catch(() => {});
+  };
+
+  const handleGoogleSignIn = async () => {
+    setGoogleLoading(true);
+    setAuthError('');
+    const result = await signInWithGoogle();
+    setGoogleLoading(false);
+
+    if (!result.success) {
+      if (result.error === 'cancelled' || result.error === 'in_progress') return;
+      setAuthError(result.error);
+      return;
+    }
+    // AppNavigator's onAuthStateChange handles routing automatically.
+    // New users (isNewUser = true) get subscription_status = 'free' → Subscription screen.
+    // Returning users are routed by resolveInitialRoute based on their status.
   };
 
   return (
@@ -167,10 +185,22 @@ const LoginScreen = ({ navigation }: Props) => {
           </View>
 
           <Pressable
-            style={styles.socialButton}
-            onPress={() => Alert.alert('Coming soon', 'Google sign-in will be available soon.')}
+            style={({ pressed }) => [
+              styles.googleBtn,
+              (googleLoading || loading) && styles.googleBtnDisabled,
+              pressed && !googleLoading && !loading && styles.pressed,
+            ]}
+            onPress={handleGoogleSignIn}
+            disabled={googleLoading || loading}
           >
-            <Text style={styles.socialButtonText}>Continue with Google</Text>
+            {googleLoading ? (
+              <ActivityIndicator color={colors.brand.primary} size="small" />
+            ) : (
+              <View style={styles.googleIcon}>
+                <Text style={styles.googleIconText}>G</Text>
+              </View>
+            )}
+            <Text style={styles.googleBtnText}>Continue with Google</Text>
           </Pressable>
 
           <View style={styles.switchRow}>
@@ -298,21 +328,38 @@ const styles = StyleSheet.create({
     color: colors.brand.textSecondary,
     fontSize: fontSizes.caption,
   },
-  socialButton: {
+  googleBtn: {
     height: spacing.buttonHeight,
-    borderRadius: spacing.borderRadius,
+    borderRadius: 11,
     borderWidth: 0.5,
-    borderColor: 'rgba(0,0,0,0.12)',
-    justifyContent: 'center',
-    alignItems: 'center',
+    borderColor: '#EEECe6',
     backgroundColor: colors.white,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
     marginBottom: spacing.gap24,
   },
-  socialButtonText: {
+  googleBtnDisabled: { opacity: 0.6 },
+  googleIcon: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#EA4335',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  googleIconText: {
+    color: colors.white,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  googleBtnText: {
     color: colors.brand.textPrimary,
-    fontSize: fontSizes.body,
+    fontSize: 12,
     fontWeight: '600',
   },
+  pressed: { opacity: 0.8 },
   switchRow: {
     flexDirection: 'row',
     justifyContent: 'center',

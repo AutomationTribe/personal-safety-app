@@ -14,6 +14,7 @@ import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { supabase } from '../../lib/supabase';
+import { signInWithGoogle } from '../../services/GoogleAuthService';
 import { colors, fontSizes, spacing } from '../../styles/tokens';
 import { AuthStackParamList } from '../../navigation/AppNavigator';
 
@@ -59,6 +60,7 @@ const SignupScreen = ({ navigation }: Props) => {
   });
 
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const [serverError, setServerError] = useState('');
 
   const formattedPhone = formatNigerianPhone(phone);
@@ -86,8 +88,20 @@ const SignupScreen = ({ navigation }: Props) => {
     setTouched((p) => ({ ...p, [field]: true }));
 
   const handleGoogleSignIn = async () => {
-    const { error } = await supabase.auth.signInWithOAuth({ provider: 'google' });
-    if (error) setServerError(error.message);
+    setGoogleLoading(true);
+    setServerError('');
+    const result = await signInWithGoogle();
+    setGoogleLoading(false);
+
+    if (!result.success) {
+      // User cancelled or sign-in already in progress — silent
+      if (result.error === 'cancelled' || result.error === 'in_progress') return;
+      setServerError(result.error);
+      return;
+    }
+    // AppNavigator's onAuthStateChange fires automatically on session creation.
+    // New users have subscription_status = 'free' → routed to Subscription.
+    // Returning users are routed by resolveInitialRoute based on their status.
   };
 
   const handleSubmit = async () => {
@@ -154,13 +168,21 @@ const SignupScreen = ({ navigation }: Props) => {
         <View style={styles.body}>
           {/* Google */}
           <Pressable
-            style={({ pressed }) => [styles.googleBtn, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.googleBtn,
+              (googleLoading || loading) && styles.googleBtnDisabled,
+              pressed && !googleLoading && !loading && styles.pressed,
+            ]}
             onPress={handleGoogleSignIn}
-            disabled={loading}
+            disabled={googleLoading || loading}
           >
-            <View style={styles.googleIcon}>
-              <Text style={styles.googleIconText}>G</Text>
-            </View>
+            {googleLoading ? (
+              <ActivityIndicator color={colors.brand.primary} size="small" />
+            ) : (
+              <View style={styles.googleIcon}>
+                <Text style={styles.googleIconText}>G</Text>
+              </View>
+            )}
             <Text style={styles.googleBtnText}>Continue with Google</Text>
           </Pressable>
 
@@ -401,6 +423,7 @@ const styles = StyleSheet.create({
     fontSize: fontSizes.body,
     fontWeight: '600',
   },
+  googleBtnDisabled: { opacity: 0.6 },
   pressed: { opacity: 0.8 },
 
   dividerRow: {

@@ -480,8 +480,14 @@ const RoutesScreen = () => {
   const confirmDeleteSingle = async () => {
     if (!tripToDelete) return;
     setDeleting(true);
-    await supabase.from('location_pings').delete().eq('trip_id', tripToDelete.id);
-    await supabase.from('trips').delete().eq('id', tripToDelete.id).neq('status', 'active');
+    try {
+      const { error: pingsErr } = await supabase.from('location_pings').delete().eq('trip_id', tripToDelete.id);
+      if (pingsErr) console.warn('[Delete] pings error:', pingsErr.message);
+      const { error: tripErr } = await supabase.from('trips').delete().eq('id', tripToDelete.id).neq('status', 'active');
+      if (tripErr) console.warn('[Delete] trip error:', tripErr.message);
+    } catch (e) {
+      console.error('[Delete] unexpected error:', e);
+    }
     setDeleting(false);
     setShowDeleteSheet(false);
     setTripToDelete(null);
@@ -499,9 +505,13 @@ const RoutesScreen = () => {
     const ids = [...selectedIds];
     const count = ids.length;
     setBulkDeleting(true);
-    for (const id of ids) {
-      await supabase.from('location_pings').delete().eq('trip_id', id);
-      await supabase.from('trips').delete().eq('id', id).neq('status', 'active');
+    try {
+      const { error: pingsErr } = await supabase.from('location_pings').delete().in('trip_id', ids);
+      if (pingsErr) console.warn('[BulkDelete] pings error:', pingsErr.message);
+      const { error: tripsErr } = await supabase.from('trips').delete().in('id', ids).neq('status', 'active');
+      if (tripsErr) console.warn('[BulkDelete] trips error:', tripsErr.message);
+    } catch (e) {
+      console.error('[BulkDelete] unexpected error:', e);
     }
     setBulkDeleting(false);
     setShowBulkSheet(false);
