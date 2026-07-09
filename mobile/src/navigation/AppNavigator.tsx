@@ -14,6 +14,7 @@ import DirectPaymentScreen from '../screens/subscription/DirectPaymentScreen';
 import TrialOfferScreen from '../screens/subscription/TrialOfferScreen';
 import SuccessScreen from '../screens/subscription/SuccessScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
+import PhoneCaptureScreen from '../screens/auth/PhoneCaptureScreen';
 import { colors } from '../styles/tokens';
 
 export type AuthStackParamList = {
@@ -31,6 +32,7 @@ export type AppStackParamList = {
   TrialOffer: undefined;
   Success: { type: 'subscriber' | 'trial' };
   Settings: undefined;
+  PhoneCapture: undefined;
 };
 
 const AuthStackNav = createNativeStackNavigator<AuthStackParamList>();
@@ -59,31 +61,29 @@ const AppStack = ({ initialRoute }: AppStackProps) => (
     <AppStackNav.Screen name="TrialOffer" component={TrialOfferScreen} />
     <AppStackNav.Screen name="Success" component={SuccessScreen} />
     <AppStackNav.Screen name="Settings" component={SettingsScreen} />
+    <AppStackNav.Screen name="PhoneCapture" component={PhoneCaptureScreen} />
   </AppStackNav.Navigator>
 );
 
 interface ProfileRow {
   subscription_status: string;
   trial_end: string | null;
+  phone: string | null;
 }
 
 async function resolveInitialRoute(userId: string): Promise<keyof AppStackParamList> {
   try {
     const { data } = await supabase
       .from('profiles')
-      .select('subscription_status, trial_end')
+      .select('subscription_status, trial_end, phone')
       .eq('id', userId)
       .single();
 
-    // No profile row means the upsert in the payment screen hasn't run yet
-    // or the row was never created. Treat as needing subscription.
-    // BUT if the user previously had a session (re-login), default to Home
-    // to avoid a broken loop — the payment screens use upsert now so this
-    // case should only occur for brand-new unsubscribed users.
+    // No profile row — email/password new user (profile created by payment flow).
     if (!data) return 'Subscription';
 
     const profile = data as ProfileRow;
-    const { subscription_status, trial_end } = profile;
+    const { subscription_status, trial_end, phone } = profile;
 
     if (subscription_status === 'active') return 'Home';
 
@@ -92,7 +92,10 @@ async function resolveInitialRoute(userId: string): Promise<keyof AppStackParamL
       return expired ? 'Subscription' : 'Home';
     }
 
-    // Explicitly 'free' → show subscription gate
+    // Free + no phone = new Google user who hasn't captured their phone yet.
+    if (subscription_status === 'free' && !phone) return 'PhoneCapture';
+
+    // Explicitly 'free' with phone → show subscription gate
     if (subscription_status === 'free') return 'Subscription';
 
     // Any other value (null, unexpected) → let the user in rather than looping

@@ -1,16 +1,33 @@
-import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import { supabase } from '../lib/supabase';
 
-// Configure once at module load — must run before any sign-in attempt
-GoogleSignin.configure({
-  webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ?? '',
-});
+// Dynamic require keeps the native module from loading in Expo Go.
+// Static imports resolve at bundle time and crash when RNGoogleSignin is absent.
+type GoogleSigninModule = typeof import('@react-native-google-signin/google-signin');
+let _module: GoogleSigninModule | null = null;
+let nativeAvailable = false;
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  _module = require('@react-native-google-signin/google-signin') as GoogleSigninModule;
+  _module.GoogleSignin.configure({
+    webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ?? '',
+  });
+  nativeAvailable = true;
+} catch {
+  console.warn('[GoogleAuth] Native module unavailable (Expo Go). Google Sign-in disabled.');
+}
 
 export type GoogleSignInResult =
   | { success: true; isNewUser: boolean }
   | { success: false; error: string };
 
 export async function signInWithGoogle(): Promise<GoogleSignInResult> {
+  if (!nativeAvailable || !_module) {
+    return { success: false, error: 'Google Sign-in requires the dev build — not available in Expo Go.' };
+  }
+
+  const { GoogleSignin, statusCodes } = _module;
+
   try {
     await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
 

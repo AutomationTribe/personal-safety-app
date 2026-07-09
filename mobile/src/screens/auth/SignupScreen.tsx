@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -15,74 +16,74 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { supabase } from '../../lib/supabase';
 import { signInWithGoogle } from '../../services/GoogleAuthService';
-import { colors, fontSizes, spacing } from '../../styles/tokens';
+import { colors } from '../../styles/tokens';
 import { AuthStackParamList } from '../../navigation/AppNavigator';
 
 type Props = {
   navigation: NativeStackNavigationProp<AuthStackParamList, 'Signup'>;
 };
 
-const NIGERIAN_E164 = /^\+234[789]\d{9}$/;
+const PHONE_DIGITS_REGEX = /^\d{10}$/;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function formatNigerianPhone(raw: string): string {
-  const t = raw.trim();
-  if (t.startsWith('+234')) return t;
-  if (t.startsWith('234')) return `+${t}`;
-  if (t.startsWith('0') && t.length >= 10) return `+234${t.slice(1)}`;
-  return t;
+// Accepts 10-digit Nigerian number (with or without leading 0 / +234 prefix).
+// Always returns E.164: +234XXXXXXXXXX
+function toE164(raw: string): string {
+  const digits = raw.replace(/\D/g, '');
+  if (digits.startsWith('234') && digits.length === 13) return `+${digits}`;
+  if (digits.startsWith('0') && digits.length === 11) return `+234${digits.slice(1)}`;
+  if (digits.length === 10) return `+234${digits}`;
+  return `+234${digits}`;
 }
 
-function passwordStrength(pw: string): number {
-  let score = 0;
-  if (pw.length >= 8) score++;
-  if (pw.length >= 12) score++;
-  if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score++;
-  if (/[0-9]/.test(pw) && /[^A-Za-z0-9]/.test(pw)) score++;
-  return score;
+function extractLocalDigits(raw: string): string {
+  const digits = raw.replace(/\D/g, '');
+  if (digits.startsWith('234')) return digits.slice(3);
+  if (digits.startsWith('0')) return digits.slice(1);
+  return digits;
 }
-
-const STRENGTH_COLORS = ['#E53E3E', '#DD6B20', '#D69E2E', '#38A169'];
-const STRENGTH_LABELS = ['Weak', 'Fair', 'Good', 'Strong'];
 
 const SignupScreen = ({ navigation }: Props) => {
   const insets = useSafeAreaInsets();
 
-  const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
   const [touched, setTouched] = useState({
-    fullName: false,
     phone: false,
+    email: false,
     password: false,
   });
 
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [serverError, setServerError] = useState('');
+  const [isDuplicate, setIsDuplicate] = useState(false);
 
-  const formattedPhone = formatNigerianPhone(phone);
+  const localDigits = extractLocalDigits(phone);
+  const e164Phone = toE164(phone);
 
   const errors = {
-    fullName: !fullName.trim()
-      ? 'Full name is required'
-      : fullName.trim().length < 2
-      ? 'Must be at least 2 characters'
-      : '',
     phone: !phone.trim()
       ? 'Phone number is required'
-      : !NIGERIAN_E164.test(formattedPhone)
-      ? 'Enter a valid Nigerian number (e.g. 08012345678)'
+      : !PHONE_DIGITS_REGEX.test(localDigits)
+      ? 'Enter a valid 10-digit Nigerian number'
       : '',
-    // Password is optional — only validate length if the user has typed something
-    password: password.length > 0 && password.length < 8
+    email: !email.trim()
+      ? 'Email address is required'
+      : !EMAIL_REGEX.test(email.trim())
+      ? 'Enter a valid email address'
+      : '',
+    password: password.length < 8
       ? 'Must be at least 8 characters'
+      : !/[^A-Za-z0-9]/.test(password)
+      ? 'Must include a symbol'
       : '',
   };
 
-  const formValid = !errors.fullName && !errors.phone && !errors.password;
+  const formValid = !errors.phone && !errors.email && !errors.password;
 
   const blur = (field: keyof typeof touched) =>
     setTouched((p) => ({ ...p, [field]: true }));
@@ -90,6 +91,7 @@ const SignupScreen = ({ navigation }: Props) => {
   const handleGoogleSignIn = async () => {
     setGoogleLoading(true);
     setServerError('');
+    setIsDuplicate(false);
     const result = await signInWithGoogle();
     setGoogleLoading(false);
 
@@ -105,27 +107,33 @@ const SignupScreen = ({ navigation }: Props) => {
   };
 
   const handleSubmit = async () => {
-    // Always clear previous server error before re-validating
     setServerError('');
-    setTouched({ fullName: true, phone: true, password: true });
+    setIsDuplicate(false);
+    setTouched({ phone: true, email: true, password: true });
     if (!formValid) return;
 
     setLoading(true);
 
-    // Use entered email, or derive one from the phone number.
-    // The derived domain must be a valid TLD so Supabase accepts it.
-    const effectiveEmail = email.trim() || `${formattedPhone.replace('+', '')}@hadin-user.com`;
-    // If no password provided, generate a secure one — the user can reset it later via email.
-    const effectivePassword = password || `${Math.random().toString(36).slice(-10)}A1!`;
+    // Check phone uniqueness before creating the auth user
+    const { data: phoneExists, error: phoneCheckError } = await supabase
+      .rpc('phone_already_registered', { p_phone: e164Phone });
 
-    const { error } = await supabase.auth.signUp({
-      email: effectiveEmail,
-      password: effectivePassword,
+    if (phoneCheckError) {
+      console.warn('[Signup] phone check error:', phoneCheckError.message);
+      // Non-fatal — proceed with signup; DB unique constraint is the final guard
+    } else if (phoneExists) {
+      setServerError('This phone number is already linked to an account.');
+      setLoading(false);
+      return;
+    }
+
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
       options: {
         data: {
-          full_name: fullName.trim(),
-          phone: formattedPhone,
-          ...(email.trim() ? { email: email.trim() } : {}),
+          phone: e164Phone,
+          email: email.trim(),
         },
       },
     });
@@ -133,14 +141,28 @@ const SignupScreen = ({ navigation }: Props) => {
     setLoading(false);
 
     if (error) {
-      setServerError(error.message || 'Unable to create account. Please try again.');
+      const msg = error.message.toLowerCase();
+      if (msg.includes('already registered') || msg.includes('already exists') || msg.includes('user already')) {
+        setIsDuplicate(true);
+      } else if (msg.includes('email signups are disabled')) {
+        setServerError('Email sign-up is currently disabled. Please contact support.');
+      } else if (msg.includes('rate limit') || msg.includes('too many')) {
+        setServerError('Too many attempts. Please wait a moment and try again.');
+      } else {
+        console.error('[Signup] signUp error:', error.message);
+        setServerError('Unable to create your account right now. Please try again.');
+      }
+      return;
+    }
+
+    // Supabase v2: duplicate email returns a user with an empty identities array
+    if (data.user?.identities?.length === 0) {
+      setIsDuplicate(true);
       return;
     }
     // Auth state change in AppNavigator will detect the new session
     // and route to Subscription screen based on subscription_status = 'free'
   };
-
-  const strength = passwordStrength(password);
 
   return (
     <KeyboardAvoidingView
@@ -148,25 +170,24 @@ const SignupScreen = ({ navigation }: Props) => {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <ScrollView
-        contentContainerStyle={styles.container}
+        contentContainerStyle={[
+          styles.container,
+          { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 28 },
+        ]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        {/* ── Green header ── */}
-        <View style={[styles.header, { paddingTop: insets.top + 10 }]}>
-          <View style={styles.brandRow}>
-            <Feather name="shield" size={16} color={colors.brand.mid} />
-            <Text style={styles.brandName}>hadin.</Text>
-          </View>
-          <Text style={styles.headerHeadline}>Your circle,{'\n'}always close.</Text>
-          <Text style={styles.headerSub}>
-            Stay connected to the people who matter, wherever you are.
-          </Text>
+        <View style={styles.hero}>
+          <Image
+            source={require('../../../assets/hadin-login-logo.png')}
+            style={styles.logoMark}
+            resizeMode="contain"
+          />
+          <Text style={styles.heroTitle}>Create Your Account</Text>
+          <Text style={styles.heroSubtitle}>Join Hadin to stay protected wherever you go.</Text>
         </View>
 
-        {/* ── Body ── */}
-        <View style={styles.body}>
-          {/* Google */}
+        <View style={styles.card}>
           <Pressable
             style={({ pressed }) => [
               styles.googleBtn,
@@ -180,52 +201,34 @@ const SignupScreen = ({ navigation }: Props) => {
               <ActivityIndicator color={colors.brand.primary} size="small" />
             ) : (
               <View style={styles.googleIcon}>
-                <Text style={styles.googleIconText}>G</Text>
+                <Image
+                  source={require('../../../assets/google-g-logo.png')}
+                  style={styles.googleLogo}
+                  resizeMode="contain"
+                />
               </View>
             )}
-            <Text style={styles.googleBtnText}>Continue with Google</Text>
+            <Text style={styles.googleBtnText}>Sign up with Google</Text>
           </Pressable>
 
           <View style={styles.dividerRow}>
             <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>or</Text>
+            <Text style={styles.dividerText}>OR</Text>
             <View style={styles.dividerLine} />
           </View>
 
-          {/* Full name */}
           <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Full name</Text>
-            <View style={[styles.inputWrapper, touched.fullName && errors.fullName ? styles.inputError : null]}>
+            <Text style={styles.inputLabel}>Phone Number</Text>
+            <View style={[styles.inputWrapper, touched.phone && errors.phone ? styles.inputError : null]}>
+              <Feather name="phone" size={15} color="#9CA3AF" style={styles.leftIcon} />
               <TextInput
                 style={styles.input}
-                value={fullName}
-                onChangeText={setFullName}
-                onBlur={() => blur('fullName')}
-                editable={!loading}
-                placeholder="Your full name"
-                placeholderTextColor="#C5C3BB"
-                autoCapitalize="words"
-                returnKeyType="next"
-              />
-            </View>
-            {touched.fullName && errors.fullName ? <Text style={styles.errorText}>{errors.fullName}</Text> : null}
-          </View>
-
-          {/* Phone */}
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Phone number</Text>
-            <View style={[styles.inputWrapper, touched.phone && errors.phone ? styles.inputError : null]}>
-              <View style={styles.prefixBadge}>
-                <Text style={styles.prefixText}>+234</Text>
-              </View>
-              <TextInput
-                style={[styles.input, styles.inputWithPrefix]}
                 value={phone}
                 onChangeText={setPhone}
                 onBlur={() => blur('phone')}
                 editable={!loading}
-                placeholder="08012345678"
-                placeholderTextColor="#C5C3BB"
+                placeholder="+1 (555) 000-0000"
+                placeholderTextColor="#A7ADB7"
                 keyboardType="phone-pad"
                 returnKeyType="next"
                 autoCorrect={false}
@@ -234,69 +237,51 @@ const SignupScreen = ({ navigation }: Props) => {
             {touched.phone && errors.phone ? <Text style={styles.errorText}>{errors.phone}</Text> : null}
           </View>
 
-          {/* Email (optional) */}
           <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>
-              Email address <Text style={styles.optionalLabel}>(optional)</Text>
-            </Text>
-            <View style={styles.inputWrapper}>
+            <Text style={styles.inputLabel}>Email Address</Text>
+            <View style={[styles.inputWrapper, touched.email && errors.email ? styles.inputError : null]}>
+              <Feather name="mail" size={15} color="#9CA3AF" style={styles.leftIcon} />
               <TextInput
                 style={styles.input}
                 value={email}
                 onChangeText={setEmail}
+                onBlur={() => blur('email')}
                 editable={!loading}
-                placeholder="your@email.com"
-                placeholderTextColor="#C5C3BB"
+                placeholder="name@company.com"
+                placeholderTextColor="#A7ADB7"
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
                 returnKeyType="next"
               />
             </View>
+            {touched.email && errors.email ? <Text style={styles.errorText}>{errors.email}</Text> : null}
           </View>
 
-          {/* Password */}
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Password</Text>
             <View style={[styles.inputWrapper, touched.password && errors.password ? styles.inputError : null]}>
+              <Feather name="lock" size={15} color="#9CA3AF" style={styles.leftIcon} />
               <TextInput
                 style={styles.input}
                 value={password}
                 onChangeText={setPassword}
                 onBlur={() => blur('password')}
                 editable={!loading}
-                placeholder="Min. 8 characters"
-                placeholderTextColor="#C5C3BB"
+                placeholder="********"
+                placeholderTextColor="#A7ADB7"
                 secureTextEntry={!showPassword}
                 returnKeyType="done"
                 onSubmitEditing={handleSubmit}
               />
-              <Pressable onPress={() => setShowPassword((v) => !v)} hitSlop={8}>
+              <Pressable onPress={() => setShowPassword((v) => !v)} hitSlop={8} style={styles.eyeBtn}>
                 <Feather name={showPassword ? 'eye-off' : 'eye'} size={16} color="#9C9A92" />
               </Pressable>
             </View>
-            {touched.password && errors.password ? (
-              <Text style={styles.errorText}>{errors.password}</Text>
-            ) : null}
-            {password.length > 0 && (
-              <View style={styles.strengthRow}>
-                {[0, 1, 2, 3].map((i) => (
-                  <View
-                    key={i}
-                    style={[
-                      styles.strengthBar,
-                      { backgroundColor: i < strength ? STRENGTH_COLORS[strength - 1] : '#E2E0D8' },
-                    ]}
-                  />
-                ))}
-                <Text style={[styles.strengthLabel, { color: strength > 0 ? STRENGTH_COLORS[strength - 1] : '#9C9A92' }]}>
-                  {strength > 0 ? STRENGTH_LABELS[strength - 1] : ''}
-                </Text>
-              </View>
-            )}
+            {touched.password && errors.password ? <Text style={styles.errorText}>{errors.password}</Text> : null}
+            <Text style={styles.passwordHint}>Must be at least 8 characters with a symbol.</Text>
           </View>
 
-          {/* Submit */}
           <Pressable
             style={({ pressed }) => [styles.button, pressed && !loading && styles.buttonPressed]}
             onPress={handleSubmit}
@@ -305,11 +290,21 @@ const SignupScreen = ({ navigation }: Props) => {
             {loading ? (
               <ActivityIndicator color="#fff" />
             ) : (
-              <Text style={styles.buttonText}>Continue →</Text>
+              <>
+                <Text style={styles.buttonText}>Sign Up</Text>
+                <Feather name="arrow-right" size={17} color="#fff" />
+              </>
             )}
           </Pressable>
 
-          {serverError ? (
+          {isDuplicate ? (
+            <View style={styles.serverErrorBox}>
+              <Feather name="alert-circle" size={14} color={colors.danger} />
+              <Text style={styles.serverErrorText}>
+                An account with this phone number or email already exists.
+              </Text>
+            </View>
+          ) : serverError ? (
             <View style={styles.serverErrorBox}>
               <Feather name="alert-circle" size={14} color={colors.danger} />
               <Text style={styles.serverErrorText}>{serverError}</Text>
@@ -319,62 +314,177 @@ const SignupScreen = ({ navigation }: Props) => {
           <View style={styles.switchRow}>
             <Text style={styles.switchText}>Already have an account? </Text>
             <Pressable onPress={() => navigation.navigate('Login')} disabled={loading}>
-              <Text style={styles.switchLink}>Sign in</Text>
+              <Text style={styles.switchLink}>Log In</Text>
             </Pressable>
           </View>
-
-          <Text style={styles.termsText}>
-            By continuing, you agree to Hadin's{' '}
-            <Text style={styles.termsLink}>Terms of Service</Text>
-            {' '}and{' '}
-            <Text style={styles.termsLink}>Privacy Policy</Text>.
-          </Text>
         </View>
+
+        <Text style={styles.termsText}>
+          By signing up, you agree to Hadin's{' '}
+          <Text style={styles.termsLink}>Terms of Service</Text>
+          {' '}and{' '}
+          <Text style={styles.termsLink}>Privacy Policy</Text>
+          {'. We use encryption to ensure your personal safety data remains private and secure.'}
+        </Text>
       </ScrollView>
     </KeyboardAvoidingView>
   );
 };
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.brand.bgSurface },
-  container: { flexGrow: 1, paddingBottom: spacing.gap32 },
-
-  header: {
-    backgroundColor: colors.brand.primary,
-    paddingHorizontal: spacing.screenPadding,
-    paddingBottom: spacing.gap24,
+  root: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
   },
-  brandRow: {
+  container: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  hero: {
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  logoMark: {
+    width: 43,
+    height: 43,
+    marginBottom: 16,
+  },
+  heroTitle: {
+    color: '#0F172A',
+    fontSize: 26,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  heroSubtitle: {
+    color: '#64748B',
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    paddingHorizontal: 23,
+    paddingTop: 25,
+    paddingBottom: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    elevation: 4,
+  },
+  googleBtn: {
+    height: 42,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    backgroundColor: '#fff',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginBottom: spacing.gap20,
+    justifyContent: 'center',
+    gap: 9,
+    marginBottom: 22,
   },
-  brandName: {
-    color: colors.white,
-    fontSize: fontSizes.caption,
+  googleIcon: {
+    width: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  googleLogo: {
+    width: 18,
+    height: 18,
+  },
+  googleBtnText: {
+    color: '#0F172A',
+    fontSize: 12,
     fontWeight: '700',
-    letterSpacing: 0.5,
   },
-  headerHeadline: {
-    fontSize: 28,
+  googleBtnDisabled: { opacity: 0.6 },
+  pressed: { opacity: 0.8 },
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+  dividerLine: {
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: '#D6DAE1',
+  },
+  dividerText: {
+    marginHorizontal: 13,
+    color: '#6B7280',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  inputGroup: {
+    marginBottom: 13,
+  },
+  inputLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#374151',
+    marginBottom: 5,
+  },
+  inputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: 43,
+    borderRadius: 7,
+    paddingHorizontal: 12,
+    backgroundColor: '#EEF0F3',
+  },
+  inputError: {
+    borderColor: colors.danger,
+    borderWidth: 1,
+    backgroundColor: '#fff',
+  },
+  leftIcon: {
+    marginRight: 8,
+  },
+  input: {
+    flex: 1,
+    color: '#0F172A',
+    fontSize: 13,
+    height: '100%',
+    padding: 0,
+  },
+  eyeBtn: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  errorText: {
+    color: colors.danger,
+    fontSize: 10,
+    marginTop: 4,
+  },
+  passwordHint: {
+    color: '#6B7280',
+    fontSize: 9,
+    marginTop: 6,
+  },
+  button: {
+    height: 49,
+    borderRadius: 7,
+    backgroundColor: '#155EEA',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 17,
+    marginBottom: 24,
+  },
+  buttonPressed: { opacity: 0.85 },
+  buttonText: {
+    color: '#fff',
+    fontSize: 17,
     fontWeight: '800',
-    color: colors.white,
-    lineHeight: 36,
-    marginBottom: spacing.gap12,
-    letterSpacing: -0.5,
   },
-  headerSub: {
-    fontSize: fontSizes.caption,
-    color: 'rgba(255,255,255,0.65)',
-    lineHeight: 20,
-  },
-
-  body: {
-    paddingHorizontal: spacing.screenPadding,
-    paddingTop: spacing.gap24,
-  },
-
   serverErrorBox: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -383,154 +493,46 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#FECACA',
     borderRadius: 8,
-    padding: 12,
-    marginBottom: spacing.gap16,
+    padding: 10,
+    marginBottom: 16,
   },
   serverErrorText: {
     flex: 1,
     color: colors.danger,
-    fontSize: fontSizes.caption,
-    lineHeight: 18,
-  },
-
-  googleBtn: {
-    height: spacing.buttonHeight,
-    borderRadius: spacing.borderRadius,
-    borderWidth: 0.5,
-    borderColor: 'rgba(0,0,0,0.12)',
-    backgroundColor: colors.white,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    marginBottom: spacing.gap16,
-  },
-  googleIcon: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: '#EA4335',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  googleIconText: {
-    color: colors.white,
     fontSize: 11,
+    lineHeight: 16,
+  },
+  signInLink: {
     fontWeight: '700',
+    textDecorationLine: 'underline',
   },
-  googleBtnText: {
-    color: colors.brand.textPrimary,
-    fontSize: fontSizes.body,
-    fontWeight: '600',
-  },
-  googleBtnDisabled: { opacity: 0.6 },
-  pressed: { opacity: 0.8 },
-
-  dividerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: spacing.gap16,
-  },
-  dividerLine: { flex: 1, height: 0.5, backgroundColor: 'rgba(0,0,0,0.1)' },
-  dividerText: {
-    marginHorizontal: spacing.gap12,
-    color: colors.brand.textSecondary,
-    fontSize: fontSizes.caption,
-  },
-
-  inputGroup: { marginBottom: spacing.gap16 },
-  inputLabel: {
-    fontSize: fontSizes.caption,
-    fontWeight: '600',
-    color: colors.brand.textSecondary,
-    marginBottom: 6,
-    letterSpacing: 0.2,
-  },
-  optionalLabel: { fontWeight: '400', color: '#B0AFA8' },
-  inputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    height: spacing.inputHeight,
-    borderWidth: 0.5,
-    borderColor: 'rgba(0,0,0,0.12)',
-    borderRadius: spacing.inputRadius,
-    paddingHorizontal: spacing.gap16,
-    backgroundColor: colors.white,
-  },
-  inputError: { borderColor: colors.danger, borderWidth: 1 },
-  input: {
-    flex: 1,
-    color: colors.brand.textPrimary,
-    fontSize: fontSizes.body,
-    height: '100%',
-  },
-  inputWithPrefix: { marginLeft: 8 },
-  prefixBadge: {
-    backgroundColor: colors.brand.light,
-    borderRadius: 6,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-  },
-  prefixText: {
-    fontSize: fontSizes.caption,
-    fontWeight: '600',
-    color: colors.brand.primary,
-  },
-  errorText: {
-    color: colors.danger,
-    fontSize: fontSizes.caption,
-    marginTop: 4,
-  },
-
-  strengthRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginTop: 8,
-  },
-  strengthBar: { flex: 1, height: 4, borderRadius: 2 },
-  strengthLabel: {
-    fontSize: fontSizes.small,
-    fontWeight: '600',
-    marginLeft: 4,
-    minWidth: 36,
-  },
-
-  button: {
-    height: spacing.buttonHeight,
-    borderRadius: spacing.borderRadius,
-    backgroundColor: colors.brand.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: spacing.gap16,
-  },
-  buttonPressed: { opacity: 0.85 },
-  buttonText: {
-    color: colors.white,
-    fontSize: fontSizes.button,
-    fontWeight: '700',
-  },
-
   switchRow: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: spacing.gap16,
   },
-  switchText: { color: colors.brand.textSecondary, fontSize: fontSizes.body },
+  switchText: {
+    color: '#64748B',
+    fontSize: 14,
+  },
   switchLink: {
-    color: colors.brand.primary,
-    fontSize: fontSizes.body,
+    color: '#155EEA',
+    fontSize: 14,
     fontWeight: '700',
   },
-
   termsText: {
     textAlign: 'center',
-    fontSize: fontSizes.small,
-    color: colors.brand.textSecondary,
-    lineHeight: 18,
+    fontSize: 9,
+    color: '#B6BDC8',
+    lineHeight: 14,
+    marginHorizontal: 26,
+    marginTop: 36,
   },
-  termsLink: { color: colors.brand.primary, fontWeight: '600' },
+  termsLink: {
+    color: '#8E96A3',
+    fontWeight: '700',
+    textDecorationLine: 'underline',
+  },
 });
 
 export default SignupScreen;
