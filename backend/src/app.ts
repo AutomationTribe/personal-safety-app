@@ -7,6 +7,7 @@ import locationRouter from './routes/location';
 import sosRouter from './routes/sos';
 import contactsRouter from './routes/contacts';
 import paymentsRouter from './routes/payments';
+import authRouter from './routes/auth';
 
 const app = express();
 
@@ -35,6 +36,7 @@ app.use('/api/v1/location', locationRouter);
 app.use('/api/v1/sos', sosRouter);
 app.use('/api/v1/contacts', contactsRouter);
 app.use('/api/v1/payments', paymentsRouter);
+app.use('/api/v1/auth', authRouter);
 
 mountSwagger(app);
 

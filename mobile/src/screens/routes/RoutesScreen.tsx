@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -6,30 +6,64 @@ import {
   Modal,
   PanResponder,
   Pressable,
+  RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import MapView from 'react-native-maps';
 import { AppStackParamList } from '../../navigation/AppNavigator';
 import { supabase } from '../../lib/supabase';
 import { colors, spacing } from '../../styles/tokens';
 import { Trip } from '../trip/StartTripModal';
 import SuccessToast from '../../components/SuccessToast';
 
+// ── Local palette (History-specific accents — not part of the shared brand tokens) ──
+
+const H = {
+  navy: '#241E46',
+  purple: '#6D28D9',
+  purpleLight: '#EDE9FE',
+  blue: '#3B6FE0',
+  blueLight: '#E8F0FE',
+  cyanText: '#0E7C86',
+  cyanLight: '#E3F6F8',
+  greenText: '#0F6E56',
+  greenLight: '#EFF9F4',
+  red: '#C0392B',
+  redLight: '#FDEDEC',
+  ink: '#1A1A1A',
+  sub: '#8B8A93',
+  hairline: '#EEECe6',
+};
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type Filter = 'all' | 'completed' | 'sos' | 'active';
+type Filter = 'all' | 'trips' | 'sos';
 
-interface TripMetrics {
-  total: number;
-  safe: number;
-  sos: number;
-  active: number;
+export interface SOSEvent {
+  id: string;
+  trip_id: string;
+  user_id: string;
+  triggered_at: string;
+  delivery_method: 'internet' | 'sms' | 'both';
+  resolved_at: string | null;
+  resolved_by: string | null;
+  notes: string | null;
+  cancelled_at: string | null;
+  contacts_total: number;
+  contacts_notified: number;
+  created_at: string;
 }
+
+type HistoryItem =
+  | { kind: 'trip'; id: string; date: string; trip: Trip }
+  | { kind: 'sos'; id: string; date: string; sos: SOSEvent };
 
 interface OpenSwipe {
   id: string;
@@ -47,7 +81,7 @@ function formatDuration(startedAt: string | null, endedAt: string | null): strin
   const totalMin = Math.round(ms / 60000);
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
-  if (h === 0) return `${m}min`;
+  if (h === 0) return `${m} minutes`;
   return `${h}h ${String(m).padStart(2, '0')}min`;
 }
 
@@ -64,23 +98,17 @@ function formatTripDate(iso: string): string {
   return d.toLocaleDateString('en-NG', { day: 'numeric', month: 'short' });
 }
 
-function computeMetrics(trips: Trip[]): TripMetrics {
-  return {
-    total: trips.length,
-    safe: trips.filter((t) => t.status === 'completed').length,
-    sos: trips.filter((t) => t.status === 'sos').length,
-    active: trips.filter((t) => t.status === 'active').length,
-  };
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('en-NG', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
 }
 
-// ── Metric box ────────────────────────────────────────────────────────────────
-
-const MetricBox = ({ label, value, valueColor }: { label: string; value: number; valueColor: string }) => (
-  <View style={rs.metricBox}>
-    <Text style={[rs.metricValue, { color: valueColor }]}>{value}</Text>
-    <Text style={rs.metricLabel}>{label}</Text>
-  </View>
-);
+function weekdayName(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-NG', { weekday: 'long' });
+}
 
 // ── Bottom nav bar ────────────────────────────────────────────────────────────
 
@@ -93,13 +121,13 @@ interface NavItemProps {
 
 const NavItem = ({ icon, label, active = false, onPress }: NavItemProps) => (
   <Pressable style={rs.navItem} onPress={onPress}>
-    <Feather name={icon} size={22} color={active ? '#1A6B4A' : '#9C9A92'} />
+    <Feather name={icon} size={22} color={active ? H.purple : '#9C9A92'} />
     {active && <View style={rs.navActiveBar} />}
     <Text style={[rs.navLabel, active && rs.navLabelActive]}>{label}</Text>
   </Pressable>
 );
 
-// ── Swipe row ─────────────────────────────────────────────────────────────────
+// ── Trip row ──────────────────────────────────────────────────────────────────
 
 const SWIPE_ACTION_WIDTH = 124; // 62px × 2
 const SWIPE_THRESHOLD = 80;
@@ -110,12 +138,13 @@ interface TripRowProps {
   selected: boolean;
   openSwipeRef: React.MutableRefObject<OpenSwipe | null>;
   onToggleSelect: (id: string) => void;
+  onEnterSelectMode: (id: string) => void;
   onView: (id: string) => void;
   onDeleteRequest: (trip: Trip) => void;
 }
 
 const TripRow = React.memo(
-  ({ trip, selectMode, selected, openSwipeRef, onToggleSelect, onView, onDeleteRequest }: TripRowProps) => {
+  ({ trip, selectMode, selected, openSwipeRef, onToggleSelect, onEnterSelectMode, onView, onDeleteRequest }: TripRowProps) => {
     const translateX = useRef(new Animated.Value(0)).current;
 
     const closeSwipe = useCallback(() => {
@@ -156,18 +185,21 @@ const TripRow = React.memo(
     const handlePress = () => {
       if (openSwipeRef.current?.id === trip.id) { closeSwipe(); return; }
       if (selectMode) onToggleSelect(trip.id);
+      else onView(trip.id);
     };
 
     const isSOS = trip.status === 'sos';
     const isActive = trip.status === 'active';
+    const isCompleted = trip.status === 'completed';
     const duration = formatDuration(trip.started_at, trip.ended_at);
-    const dateStr = formatTripDate(trip.created_at);
+    const timeStr = formatTime(trip.started_at ?? trip.created_at);
+    const destLabel = trip.destination ?? trip.title ?? 'Unknown destination';
 
-    const meta = isActive
-      ? `${dateStr}  ·  In progress`
-      : `${dateStr}${duration ? `  ·  ${duration}` : ''}`;
-
-    const badgeLabel = isSOS ? 'SOS fired' : isActive ? 'Active' : 'Safe';
+    const metaLine = isActive
+      ? 'In progress'
+      : duration
+        ? `${duration} duration`
+        : formatTripDate(trip.created_at);
 
     return (
       <View style={rs.rowOuter}>
@@ -188,49 +220,191 @@ const TripRow = React.memo(
           style={[rs.card, { transform: [{ translateX }] }]}
           {...(selectMode ? {} : panResponder.panHandlers)}
         >
-          <Pressable style={rs.cardInner} onPress={handlePress}>
-            {/* Checkbox — always visible */}
-            <View style={[rs.checkbox, selected && rs.checkboxChecked]}>
-              {selected && <Feather name="check" size={11} color="#fff" />}
-            </View>
+          <Pressable
+            style={rs.cardInner}
+            onPress={handlePress}
+            onLongPress={() => onEnterSelectMode(trip.id)}
+          >
+            {selectMode && (
+              <View style={[rs.checkbox, selected && rs.checkboxChecked]}>
+                {selected && <Feather name="check" size={11} color="#fff" />}
+              </View>
+            )}
 
-            {/* Route icon */}
-            <View style={[rs.routeIcon, isSOS && rs.routeIconSOS]}>
+            {/* Trip icon */}
+            <View style={[rs.tripIcon, isSOS && rs.tripIconSOS]}>
               <Feather
-                name={isSOS ? 'alert-triangle' : 'navigation'}
+                name={isSOS ? 'alert-triangle' : 'map-pin'}
                 size={16}
-                color={isSOS ? '#C0392B' : '#1A6B4A'}
+                color={isSOS ? H.red : H.blue}
               />
             </View>
 
             {/* Info */}
             <View style={rs.info}>
-              <Text style={rs.route} numberOfLines={1}>
-                {trip.origin ?? '—'}  →  {trip.destination ?? '—'}
-              </Text>
-              <Text style={rs.meta}>{meta}</Text>
-            </View>
-
-            {/* Badge + date */}
-            <View style={rs.rightCol}>
-              <View style={[rs.badge, isSOS ? rs.badgeSOS : rs.badgeSafe]}>
-                <Text style={[rs.badgeText, isSOS ? rs.badgeSOSText : rs.badgeSafeText]}>
-                  {badgeLabel}
-                </Text>
+              <View style={rs.titleRow}>
+                <Text style={rs.tripTitle} numberOfLines={1}>Trip to {destLabel}</Text>
+                <Text style={rs.timeText}>{timeStr}</Text>
               </View>
-              <Text style={rs.dateText}>{dateStr}</Text>
+              <View style={rs.metaRow}>
+                <Feather name="clock" size={11} color={H.sub} />
+                <Text style={rs.meta}>{metaLine}</Text>
+              </View>
+              <View style={rs.badgeRow}>
+                {isCompleted && (
+                  <View style={[rs.badge, rs.badgeGreen]}>
+                    <Text style={[rs.badgeText, rs.badgeGreenText]}>Completed</Text>
+                  </View>
+                )}
+                {isCompleted && (
+                  <View style={[rs.badge, rs.badgeCyan]}>
+                    <Text style={[rs.badgeText, rs.badgeCyanText]}>Safe Passage</Text>
+                  </View>
+                )}
+                {isActive && (
+                  <View style={[rs.badge, rs.badgeBlue]}>
+                    <Text style={[rs.badgeText, rs.badgeBlueText]}>Active</Text>
+                  </View>
+                )}
+                {isSOS && (
+                  <View style={[rs.badge, rs.badgeRed]}>
+                    <Text style={[rs.badgeText, rs.badgeRedText]}>SOS fired</Text>
+                  </View>
+                )}
+              </View>
             </View>
-
-            {/* Chevron — hidden in select mode */}
-            {!selectMode && (
-              <Feather name="chevron-right" size={14} color="#D0CEC8" />
-            )}
           </Pressable>
         </Animated.View>
       </View>
     );
   }
 );
+
+// ── SOS row (read-only) ───────────────────────────────────────────────────────
+
+const SOSRow = React.memo(({ sos }: { sos: SOSEvent }) => {
+  const dateStr = formatTripDate(sos.triggered_at);
+  const timeStr = formatTime(sos.triggered_at);
+  const status: 'Resolved' | 'Cancelled' | 'Active' = sos.cancelled_at
+    ? 'Cancelled'
+    : sos.resolved_at
+      ? 'Resolved'
+      : 'Active';
+  const deliveryLabel =
+    sos.delivery_method === 'sms'
+      ? 'Sent via SMS'
+      : sos.delivery_method === 'internet'
+        ? 'Sent via internet'
+        : 'Sent via SMS + internet';
+
+  return (
+    <View style={ss.card}>
+      <View style={ss.cardInner}>
+        <View style={ss.icon}>
+          <Feather name="alert-triangle" size={16} color={H.red} />
+        </View>
+        <View style={ss.info}>
+          <View style={ss.titleRow}>
+            <Text style={ss.title}>Emergency SOS Triggered</Text>
+            <Text style={ss.time}>{timeStr}</Text>
+          </View>
+          <View style={ss.locRow}>
+            <Feather name="map-pin" size={11} color={H.sub} />
+            <Text style={ss.meta}>{dateStr}  ·  {deliveryLabel}</Text>
+          </View>
+          <View style={ss.badgeRow}>
+            <View style={ss.priorityBadge}>
+              <Text style={ss.priorityBadgeText}>PRIORITY HIGH</Text>
+            </View>
+            <View
+              style={[
+                ss.badge,
+                status === 'Resolved' ? ss.badgeResolved : status === 'Cancelled' ? ss.badgeCancelled : ss.badgeActive,
+              ]}
+            >
+              <Text
+                style={[
+                  ss.badgeText,
+                  status === 'Resolved' ? ss.badgeResolvedText : status === 'Cancelled' ? ss.badgeCancelledText : ss.badgeActiveText,
+                ]}
+              >
+                {status}
+              </Text>
+            </View>
+          </View>
+        </View>
+      </View>
+    </View>
+  );
+});
+
+const ss = StyleSheet.create({
+  card: {
+    backgroundColor: colors.white,
+    borderRadius: 14,
+    borderLeftWidth: 3,
+    borderLeftColor: H.red,
+    borderWidth: 0.5,
+    borderColor: H.hairline,
+    marginBottom: 10,
+  },
+  cardInner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 12,
+    paddingHorizontal: 13,
+    gap: 10,
+  },
+  icon: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: H.redLight,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexShrink: 0,
+    marginTop: 2,
+  },
+  info: { flex: 1, gap: 6 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  title: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: H.ink,
+  },
+  time: { fontSize: 11, color: H.sub },
+  locRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  meta: {
+    fontSize: 11,
+    color: H.sub,
+  },
+  badgeRow: { flexDirection: 'row', gap: 6 },
+  priorityBadge: {
+    backgroundColor: H.red,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  priorityBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#fff',
+    letterSpacing: 0.3,
+  },
+  badge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 0.5,
+  },
+  badgeResolved: { backgroundColor: H.greenLight, borderColor: '#C6E8D5' },
+  badgeResolvedText: { color: H.greenText },
+  badgeCancelled: { backgroundColor: '#F4F3EF', borderColor: '#E0DED8' },
+  badgeCancelledText: { color: '#9C9A92' },
+  badgeActive: { backgroundColor: H.redLight, borderColor: '#F9C6C6' },
+  badgeActiveText: { color: '#A32D2D' },
+  badgeText: { fontSize: 10, fontWeight: '600' },
+});
 
 // ── Delete sheet ──────────────────────────────────────────────────────────────
 
@@ -378,16 +552,26 @@ const BulkDeleteSheet = ({ visible, count, hasActive, deleting, onConfirm, onCan
 
 const FILTER_TABS: { key: Filter; label: string }[] = [
   { key: 'all', label: 'All' },
-  { key: 'completed', label: 'Safe' },
-  { key: 'sos', label: 'SOS' },
-  { key: 'active', label: 'Active' },
+  { key: 'trips', label: 'Trips' },
+  { key: 'sos', label: 'SOS Alerts' },
 ];
 
-const EMPTY_TITLES: Record<Filter, string> = {
-  all: 'No trips yet',
-  completed: 'No safe trips',
-  sos: 'No SOS trips',
-  active: 'No active trips',
+const EMPTY_STATE: Record<Filter, { icon: React.ComponentProps<typeof Feather>['name']; title: string; sub?: string }> = {
+  all: {
+    icon: 'activity',
+    title: 'No activity yet',
+    sub: "Your trips and SOS alerts will appear here once you start using Hadin's safety features.",
+  },
+  trips: {
+    icon: 'navigation',
+    title: 'No trips yet',
+    sub: 'Start your first trip from the home screen.',
+  },
+  sos: {
+    icon: 'shield',
+    title: 'No SOS alerts',
+    sub: "You haven't triggered an SOS. That's a good thing.",
+  },
 };
 
 const RoutesScreen = () => {
@@ -395,9 +579,12 @@ const RoutesScreen = () => {
   const navigation = useNavigation<Nav>();
 
   const [trips, setTrips] = useState<Trip[]>([]);
-  const [filtered, setFiltered] = useState<Trip[]>([]);
+  const [sosEvents, setSosEvents] = useState<SOSEvent[]>([]);
+  const [query, setQuery] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<Filter>('all');
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectMode, setSelectMode] = useState(false);
   const [showDeleteSheet, setShowDeleteSheet] = useState(false);
@@ -406,7 +593,6 @@ const RoutesScreen = () => {
   const [showBulkSheet, setShowBulkSheet] = useState(false);
   const [bulkHasActive, setBulkHasActive] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
-  const [metrics, setMetrics] = useState<TripMetrics>({ total: 0, safe: 0, sos: 0, active: 0 });
   const [toast, setToast] = useState<{ visible: boolean; title: string }>({ visible: false, title: '' });
 
   const openSwipeRef = useRef<OpenSwipe | null>(null);
@@ -423,29 +609,62 @@ const RoutesScreen = () => {
       .from('trips')
       .select('*')
       .order('created_at', { ascending: false });
-    const rows = (data as Trip[]) ?? [];
-    setTrips(rows);
-    setMetrics(computeMetrics(rows));
-    setLoading(false);
+    setTrips((data as Trip[]) ?? []);
   }, []);
 
-  const loadTripsRef = useRef(loadTrips);
-  useEffect(() => { loadTripsRef.current = loadTrips; }, [loadTrips]);
+  const loadSOS = useCallback(async () => {
+    const { data } = await supabase
+      .from('sos_events')
+      .select('*')
+      .order('triggered_at', { ascending: false });
+    setSosEvents((data as SOSEvent[]) ?? []);
+  }, []);
+
+  const loadAll = useCallback(async () => {
+    await Promise.all([loadTrips(), loadSOS()]);
+    setLoading(false);
+  }, [loadTrips, loadSOS]);
+
+  const loadAllRef = useRef(loadAll);
+  useEffect(() => { loadAllRef.current = loadAll; }, [loadAll]);
 
   useEffect(() => {
-    loadTripsRef.current();
+    loadAllRef.current();
     const channel = supabase
-      .channel(`routes-trips-${Date.now()}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, () => { loadTripsRef.current(); })
+      .channel(`routes-history-${Date.now()}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, () => { loadAllRef.current(); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sos_events' }, () => { loadAllRef.current(); })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, []);
 
-  useEffect(() => {
-    setFiltered(
-      activeFilter === 'all' ? trips : trips.filter((t) => t.status === activeFilter)
-    );
-  }, [trips, activeFilter]);
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadAll();
+    setRefreshing(false);
+  }, [loadAll]);
+
+  const historyItems = useMemo<HistoryItem[]>(() => {
+    const q = query.trim().toLowerCase();
+    const tripItems: HistoryItem[] = trips
+      .filter((t) => !q || (t.origin ?? '').toLowerCase().includes(q) || (t.destination ?? '').toLowerCase().includes(q))
+      .map((t) => ({ kind: 'trip', id: t.id, date: t.created_at, trip: t }));
+    const sosItems: HistoryItem[] = q
+      ? []
+      : sosEvents.map((s) => ({ kind: 'sos', id: s.id, date: s.triggered_at, sos: s }));
+
+    let combined: HistoryItem[];
+    if (activeFilter === 'trips') combined = tripItems;
+    else if (activeFilter === 'sos') combined = sosItems;
+    else combined = [...tripItems, ...sosItems];
+
+    return combined.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [trips, sosEvents, activeFilter, query]);
+
+  const tripIdsInView = useMemo(
+    () => historyItems.filter((i): i is Extract<HistoryItem, { kind: 'trip' }> => i.kind === 'trip').map((i) => i.id),
+    [historyItems]
+  );
 
   const exitSelectMode = useCallback(() => {
     setSelectMode(false);
@@ -453,19 +672,15 @@ const RoutesScreen = () => {
     closeAllSwipes();
   }, [closeAllSwipes]);
 
-  const allFilteredSelected = filtered.length > 0 && filtered.every((t) => selectedIds.includes(t.id));
-
-  const handleSelectAll = () => {
-    if (!selectMode) {
-      setSelectMode(true);
-      setSelectedIds(filtered.map((t) => t.id));
-      return;
-    }
-    setSelectedIds(allFilteredSelected ? [] : filtered.map((t) => t.id));
-  };
+  const allFilteredSelected = tripIdsInView.length > 0 && tripIdsInView.every((id) => selectedIds.includes(id));
 
   const handleToggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+  }, []);
+
+  const handleEnterSelectMode = useCallback((id: string) => {
+    setSelectMode(true);
+    setSelectedIds([id]);
   }, []);
 
   const handleDeleteRequest = useCallback((trip: Trip) => {
@@ -491,7 +706,7 @@ const RoutesScreen = () => {
     setDeleting(false);
     setShowDeleteSheet(false);
     setTripToDelete(null);
-    await loadTrips();
+    await loadAll();
     setToast({ visible: true, title: 'Trip deleted' });
   };
 
@@ -515,94 +730,214 @@ const RoutesScreen = () => {
     }
     setBulkDeleting(false);
     setShowBulkSheet(false);
-    await loadTrips();
+    await loadAll();
     exitSelectMode();
     setToast({ visible: true, title: `${count} trip${count !== 1 ? 's' : ''} deleted` });
   };
 
-  const renderItem = useCallback(({ item }: { item: Trip }) => (
-    <TripRow
-      trip={item}
-      selectMode={selectMode}
-      selected={selectedIds.includes(item.id)}
-      openSwipeRef={openSwipeRef}
-      onToggleSelect={handleToggleSelect}
-      onView={handleView}
-      onDeleteRequest={handleDeleteRequest}
-    />
-  ), [selectMode, selectedIds, handleToggleSelect, handleView, handleDeleteRequest]);
+  const renderItem = useCallback(({ item }: { item: HistoryItem }) => {
+    if (item.kind === 'sos') return <SOSRow sos={item.sos} />;
+    return (
+      <TripRow
+        trip={item.trip}
+        selectMode={selectMode}
+        selected={selectedIds.includes(item.id)}
+        openSwipeRef={openSwipeRef}
+        onToggleSelect={handleToggleSelect}
+        onEnterSelectMode={handleEnterSelectMode}
+        onView={handleView}
+        onDeleteRequest={handleDeleteRequest}
+      />
+    );
+  }, [selectMode, selectedIds, handleToggleSelect, handleEnterSelectMode, handleView, handleDeleteRequest]);
+
+  const emptyState = query.trim()
+    ? { icon: 'search' as const, title: `No results for "${query.trim()}"`, sub: undefined }
+    : EMPTY_STATE[activeFilter];
+
+  const isFullyEmpty = !loading && trips.length === 0 && sosEvents.length === 0 && !query.trim();
+
+  // ── Frequent destination + weekly overview (footer widgets) ──────────────────
+
+  const frequentDestination = useMemo(() => {
+    const counts = new Map<string, number>();
+    trips.forEach((t) => {
+      if (!t.destination) return;
+      counts.set(t.destination, (counts.get(t.destination) ?? 0) + 1);
+    });
+    let best: string | null = null;
+    let bestCount = 0;
+    counts.forEach((count, dest) => {
+      if (count > bestCount) { best = dest; bestCount = count; }
+    });
+    return best;
+  }, [trips]);
+
+  const weeklyOverview = useMemo(() => {
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const tripsThisWeek = trips.filter((t) => new Date(t.created_at).getTime() >= weekAgo);
+    const safeThisWeek = tripsThisWeek.filter((t) => t.status === 'completed').length;
+    const lastSOS = sosEvents[0] ?? null;
+    return { count: tripsThisWeek.length, safe: safeThisWeek, lastSOS };
+  }, [trips, sosEvents]);
+
+  const showFooterWidgets = activeFilter === 'all' && !query.trim() && !isFullyEmpty;
 
   return (
     <View style={rs.root}>
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <View style={[rs.header, { paddingTop: insets.top + 10 }]}>
-        <View>
-          <Text style={rs.headerTitle}>My routes</Text>
-          <Text style={rs.headerSub}>Your travel history</Text>
-        </View>
-        <Pressable style={rs.selectAllBtn} onPress={handleSelectAll}>
-          <View style={[rs.selectAllBox, allFilteredSelected && rs.selectAllBoxChecked]}>
-            {allFilteredSelected && <Feather name="check" size={12} color="#fff" />}
-          </View>
-          <Text style={rs.selectAllLabel}>Select all</Text>
-        </Pressable>
-      </View>
-
-      {/* ── Metrics strip ──────────────────────────────────────────────────── */}
-      <View style={rs.metricsStrip}>
-        <MetricBox label="Total trips" value={metrics.total} valueColor="#1A1A1A" />
-        <MetricBox label="Safe"        value={metrics.safe}  valueColor="#1A6B4A" />
-        <MetricBox label="SOS fired"   value={metrics.sos}   valueColor="#C0392B" />
-        <MetricBox label="Active"      value={metrics.active} valueColor="#1D9E75" />
-      </View>
-
-      {/* ── Filter tabs ────────────────────────────────────────────────────── */}
-      <View style={rs.filterRow}>
-        {FILTER_TABS.map(({ key, label }) => (
-          <Pressable
-            key={key}
-            style={[rs.filterTab, activeFilter === key && rs.filterTabActive]}
-            onPress={() => setActiveFilter(key)}
-          >
-            <Text style={[rs.filterLabel, activeFilter === key && rs.filterLabelActive]}>
-              {label}
-            </Text>
+        <View style={rs.headerTop}>
+          <Pressable style={rs.headerIconBtn} onPress={() => navigation.navigate('Home')} hitSlop={8}>
+            <Feather name="arrow-left" size={20} color={H.ink} />
           </Pressable>
-        ))}
+          <Text style={rs.headerTitle}>History</Text>
+          <Pressable
+            style={rs.headerIconBtn}
+            onPress={() => setSearchOpen((v) => !v)}
+            hitSlop={8}
+          >
+            <Feather name={searchOpen ? 'x' : 'search'} size={19} color={H.ink} />
+          </Pressable>
+        </View>
+        <Text style={rs.headerSub}>Review your recent safety activity and travel logs.</Text>
+
+        {searchOpen && (
+          <View style={rs.searchRow}>
+            <Feather name="search" size={15} color="#9C9A92" />
+            <TextInput
+              style={rs.searchInput}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search by destination…"
+              placeholderTextColor="#B4B2A9"
+              returnKeyType="search"
+              autoFocus
+            />
+            {query.length > 0 && (
+              <Pressable onPress={() => setQuery('')} hitSlop={8}>
+                <Feather name="x" size={15} color="#9C9A92" />
+              </Pressable>
+            )}
+          </View>
+        )}
+      </View>
+
+      {/* ── Filter tabs (segmented pill) ──────────────────────────────────── */}
+      <View style={rs.filterWrap}>
+        <View style={rs.filterRow}>
+          {FILTER_TABS.map(({ key, label }) => (
+            <Pressable
+              key={key}
+              style={[rs.filterTab, activeFilter === key && rs.filterTabActive]}
+              onPress={() => setActiveFilter(key)}
+            >
+              <Text style={[rs.filterLabel, activeFilter === key && rs.filterLabelActive]}>
+                {label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
       </View>
 
       {/* ── Content ────────────────────────────────────────────────────────── */}
       {loading ? (
         <View style={rs.centerWrap}>
-          <ActivityIndicator color="#1A6B4A" size="large" />
+          <ActivityIndicator color={H.purple} size="large" />
         </View>
-      ) : filtered.length === 0 ? (
+      ) : isFullyEmpty ? (
+        <View style={rs.emptyScreen}>
+          <View style={rs.emptyIconLg}>
+            <Feather name="clock" size={30} color={H.purple} />
+          </View>
+          <Text style={rs.emptyTitleLg}>No Activity Yet</Text>
+          <Text style={rs.emptySubLg}>
+            Your trips and safety alerts will appear here once you start using Hadin features.
+            We'll keep a detailed log of your protected movements.
+          </Text>
+
+          <Pressable style={rs.startTripBtn} onPress={() => navigation.navigate('Home')}>
+            <Text style={rs.startTripBtnText}>Start a Trip</Text>
+          </Pressable>
+          <Pressable onPress={() => navigation.navigate('Home')}>
+            <Text style={rs.returnLink}>Return to Dashboard</Text>
+          </Pressable>
+
+          <View style={rs.infoChipsRow}>
+            <View style={rs.infoChip}>
+              <Feather name="shield" size={16} color={H.purple} />
+              <Text style={rs.infoChipTitle}>Data Protection</Text>
+              <Text style={rs.infoChipSub}>Encrypt data logs for your safety only.</Text>
+            </View>
+            <View style={rs.infoChip}>
+              <Feather name="trending-up" size={16} color={H.purple} />
+              <Text style={rs.infoChipTitle}>Route Insights</Text>
+              <Text style={rs.infoChipSub}>Review past safety scores.</Text>
+            </View>
+          </View>
+        </View>
+      ) : historyItems.length === 0 ? (
         <View style={rs.centerWrap}>
           <View style={rs.emptyIcon}>
-            <Feather name="navigation" size={26} color="#1A6B4A" />
+            <Feather name={emptyState.icon} size={26} color={H.purple} />
           </View>
-          <Text style={rs.emptyTitle}>{EMPTY_TITLES[activeFilter]}</Text>
-          {activeFilter === 'all' && (
-            <Text style={rs.emptySub}>Start your first trip from the home screen.</Text>
-          )}
+          <Text style={rs.emptyTitle}>{emptyState.title}</Text>
+          {emptyState.sub && <Text style={rs.emptySub}>{emptyState.sub}</Text>}
         </View>
       ) : (
         <FlatList
-          data={filtered}
-          keyExtractor={(item) => item.id}
+          data={historyItems}
+          keyExtractor={(item) => `${item.kind}-${item.id}`}
           renderItem={renderItem}
           contentContainerStyle={rs.listContent}
           showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={H.purple} colors={[H.purple]} />
+          }
+          ListFooterComponent={
+            showFooterWidgets ? (
+              <View style={rs.footerWidgets}>
+                {frequentDestination && (
+                  <View style={rs.mapCard}>
+                    <MapView style={rs.mapCardMap} scrollEnabled={false} zoomEnabled={false} pointerEvents="none" />
+                    <View style={rs.mapCardOverlay}>
+                      <Text style={rs.mapCardLabel}>FREQUENT DESTINATION</Text>
+                      <Text style={rs.mapCardValue}>{frequentDestination}</Text>
+                    </View>
+                  </View>
+                )}
+
+                <View style={rs.weeklyCard}>
+                  <Text style={rs.weeklyTitle}>Weekly Overview</Text>
+                  <Text style={rs.weeklyBody}>
+                    {weeklyOverview.count > 0
+                      ? `You completed ${weeklyOverview.safe} safe trip${weeklyOverview.safe !== 1 ? 's' : ''} out of ${weeklyOverview.count} this week. `
+                      : 'No trips recorded this week. '}
+                    {weeklyOverview.lastSOS
+                      ? `No critical incidents were reported since your last SOS on ${weekdayName(weeklyOverview.lastSOS.triggered_at)}.`
+                      : 'No SOS alerts have been recorded.'}
+                  </Text>
+                  <Pressable
+                    style={rs.pdfBtn}
+                    onPress={() => setToast({ visible: true, title: 'PDF export coming soon' })}
+                  >
+                    <Feather name="download" size={14} color="#fff" />
+                    <Text style={rs.pdfBtnText}>Download PDF Report</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null
+          }
         />
       )}
 
       {/* ── Bottom nav ─────────────────────────────────────────────────────── */}
       <View style={[rs.bottomNav, { paddingBottom: insets.bottom || 14 }]}>
-        <NavItem icon="home"     label="Home"     onPress={() => navigation.navigate('Home')} />
-        <NavItem icon="map"      label="Routes"   active />
-        <NavItem icon="users"    label="Circle"   onPress={() => navigation.navigate('Circle')} />
-        <NavItem icon="settings" label="Settings" onPress={() => navigation.navigate('Settings')} />
+        <NavItem icon="grid"  label="Dashboard" onPress={() => navigation.navigate('Home')} />
+        <NavItem icon="users" label="Circle"    onPress={() => navigation.navigate('Circle')} />
+        <NavItem icon="clock" label="History"   active />
+        <NavItem icon="user"  label="Profile"   onPress={() => navigation.navigate('Settings')} />
       </View>
 
       {/* ── Select mode toolbar (covers header) ────────────────────────────── */}
@@ -611,6 +946,12 @@ const RoutesScreen = () => {
           <Pressable style={rs.toolbarLeft} onPress={exitSelectMode}>
             <Feather name="x" size={20} color="#fff" />
             <Text style={rs.toolbarCount}>{selectedIds.length} selected</Text>
+          </Pressable>
+          <Pressable
+            style={rs.toolbarSelectAll}
+            onPress={() => setSelectedIds(allFilteredSelected ? [] : tripIdsInView)}
+          >
+            <Text style={rs.toolbarSelectAllText}>{allFilteredSelected ? 'Deselect all' : 'Select all'}</Text>
           </Pressable>
           <Pressable
             style={[rs.toolbarDeleteChip, selectedIds.length === 0 && rs.toolbarDeleteChipDisabled]}
@@ -661,107 +1002,85 @@ const rs = StyleSheet.create({
 
   // Header
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
     backgroundColor: '#fff',
     paddingHorizontal: 18,
     paddingBottom: 14,
     borderBottomWidth: 0.5,
-    borderBottomColor: '#EEECe6',
+    borderBottomColor: H.hairline,
   },
-  headerTitle: {
-    fontSize: 21,
-    fontWeight: '800',
-    color: '#1A1A1A',
-    letterSpacing: -0.03 * 21,
-  },
-  headerSub: {
-    fontSize: 11,
-    color: '#9C9A92',
-    marginTop: 2,
-  },
-  selectAllBtn: {
+  headerTop: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    justifyContent: 'space-between',
   },
-  selectAllBox: {
-    width: 18,
-    height: 18,
-    borderRadius: 5,
-    borderWidth: 1.5,
-    borderColor: '#E0DED8',
-    backgroundColor: '#fff',
+  headerIconBtn: {
+    width: 34,
+    height: 34,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  selectAllBoxChecked: {
-    backgroundColor: '#1A6B4A',
-    borderColor: '#1A6B4A',
+  headerTitle: {
+    fontSize: 19,
+    fontWeight: '800',
+    color: H.ink,
+    letterSpacing: -0.03 * 19,
   },
-  selectAllLabel: {
-    fontSize: 11,
-    color: '#9C9A92',
+  headerSub: {
+    fontSize: 12,
+    color: H.sub,
+    marginTop: 4,
+    lineHeight: 17,
   },
 
-  // Metrics
-  metricsStrip: {
+  // Search bar
+  searchRow: {
     flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#F4F3EF',
+    marginTop: 10,
+    paddingHorizontal: 12,
+    height: 38,
+    borderRadius: 10,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: '#1A1A1A',
+    height: '100%',
+  },
+
+  // Filter tabs — segmented pill
+  filterWrap: {
     backgroundColor: '#fff',
     paddingHorizontal: 18,
-    paddingVertical: 13,
-    gap: 8,
+    paddingBottom: 12,
+    paddingTop: 10,
     borderBottomWidth: 0.5,
-    borderBottomColor: '#EEECe6',
+    borderBottomColor: H.hairline,
   },
-  metricBox: {
-    flex: 1,
-    backgroundColor: '#F4F3EF',
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 6,
-    alignItems: 'center',
-    borderWidth: 0.5,
-    borderColor: '#EEECe6',
-  },
-  metricValue: {
-    fontSize: 20,
-    fontWeight: '800',
-    letterSpacing: -0.6,
-  },
-  metricLabel: {
-    fontSize: 10,
-    color: '#9C9A92',
-    marginTop: 2,
-    textAlign: 'center',
-  },
-
-  // Filter tabs
   filterRow: {
     flexDirection: 'row',
-    backgroundColor: '#fff',
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#EEECe6',
+    backgroundColor: '#F1EFF7',
+    borderRadius: 12,
+    padding: 3,
   },
   filterTab: {
     flex: 1,
     alignItems: 'center',
     paddingVertical: 8,
-    paddingHorizontal: 4,
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent',
+    borderRadius: 10,
   },
   filterTabActive: {
-    borderBottomColor: '#1A6B4A',
+    backgroundColor: H.navy,
   },
   filterLabel: {
-    fontSize: 11,
-    fontWeight: '500',
-    color: '#9C9A92',
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6B6A73',
   },
   filterLabelActive: {
-    color: '#1A6B4A',
+    color: '#fff',
     fontWeight: '700',
   },
 
@@ -775,7 +1094,7 @@ const rs = StyleSheet.create({
   // Row
   rowOuter: {
     position: 'relative',
-    marginBottom: 8,
+    marginBottom: 10,
   },
   swipeActions: {
     position: 'absolute',
@@ -810,17 +1129,17 @@ const rs = StyleSheet.create({
     backgroundColor: '#fff',
     borderRadius: 14,
     borderWidth: 0.5,
-    borderColor: '#EEECe6',
+    borderColor: H.hairline,
   },
   cardInner: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     paddingVertical: 12,
     paddingHorizontal: 13,
     gap: 10,
   },
 
-  // Checkbox — always visible per design
+  // Checkbox — shown only in select mode
   checkbox: {
     width: 18,
     height: 18,
@@ -831,80 +1150,138 @@ const rs = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     flexShrink: 0,
+    marginTop: 8,
   },
   checkboxChecked: {
-    backgroundColor: '#1A6B4A',
-    borderColor: '#1A6B4A',
+    backgroundColor: H.purple,
+    borderColor: H.purple,
   },
 
-  // Route icon
-  routeIcon: {
+  // Trip icon
+  tripIcon: {
     width: 34,
     height: 34,
     borderRadius: 10,
-    backgroundColor: '#EFF9F4',
+    backgroundColor: H.blueLight,
     justifyContent: 'center',
     alignItems: 'center',
     flexShrink: 0,
+    marginTop: 2,
   },
-  routeIconSOS: {
-    backgroundColor: '#FDEDEC',
+  tripIconSOS: {
+    backgroundColor: H.redLight,
   },
 
   // Info
-  info: { flex: 1 },
-  route: {
+  info: { flex: 1, gap: 6 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  tripTitle: {
+    flex: 1,
     fontSize: 13,
     fontWeight: '700',
-    color: '#1A1A1A',
+    color: H.ink,
   },
+  timeText: {
+    fontSize: 11,
+    color: H.sub,
+    marginLeft: 8,
+  },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   meta: {
-    fontSize: 10,
-    color: '#9C9A92',
-    marginTop: 2,
+    fontSize: 11,
+    color: H.sub,
   },
-
-  // Right column
-  rightCol: {
-    alignItems: 'flex-end',
-    gap: 4,
-    flexShrink: 0,
-  },
+  badgeRow: { flexDirection: 'row', gap: 6 },
   badge: {
-    paddingHorizontal: 7,
-    paddingVertical: 2,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
     borderRadius: 6,
     borderWidth: 0.5,
   },
-  badgeSafe: {
-    backgroundColor: '#EFF9F4',
-    borderColor: '#C6E8D5',
-  },
-  badgeSafeText: {
-    color: '#0F6E56',
-  },
-  badgeSOS: {
-    backgroundColor: '#FDEDEC',
-    borderColor: '#F9C6C6',
-  },
-  badgeSOSText: {
-    color: '#A32D2D',
-  },
+  badgeGreen: { backgroundColor: H.greenLight, borderColor: '#C6E8D5' },
+  badgeGreenText: { color: H.greenText },
+  badgeCyan: { backgroundColor: H.cyanLight, borderColor: '#BFE6EC' },
+  badgeCyanText: { color: H.cyanText },
+  badgeBlue: { backgroundColor: H.blueLight, borderColor: '#C9DCFB' },
+  badgeBlueText: { color: H.blue },
+  badgeRed: { backgroundColor: H.redLight, borderColor: '#F9C6C6' },
+  badgeRedText: { color: '#A32D2D' },
   badgeText: {
     fontSize: 10,
     fontWeight: '600',
   },
-  dateText: {
-    fontSize: 10,
-    color: '#B4B2A9',
+
+  // Frequent destination map card
+  footerWidgets: { gap: 12, marginTop: 4 },
+  mapCard: {
+    height: 130,
+    borderRadius: 16,
+    overflow: 'hidden',
+    borderWidth: 0.5,
+    borderColor: H.hairline,
+  },
+  mapCardMap: { flex: 1 },
+  mapCardOverlay: {
+    position: 'absolute',
+    left: 12,
+    bottom: 12,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  mapCardLabel: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: H.sub,
+    letterSpacing: 0.4,
+  },
+  mapCardValue: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: H.ink,
+    marginTop: 2,
+  },
+
+  // Weekly overview card
+  weeklyCard: {
+    backgroundColor: H.navy,
+    borderRadius: 16,
+    padding: 16,
+  },
+  weeklyTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#fff',
+    marginBottom: 6,
+  },
+  weeklyBody: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.8)',
+    lineHeight: 18,
+    marginBottom: 14,
+  },
+  pdfBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: H.purple,
+    borderRadius: 12,
+    paddingVertical: 12,
+  },
+  pdfBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#fff',
   },
 
   // Bottom nav
   bottomNav: {
     flexDirection: 'row',
-    backgroundColor: '#fff',
+    backgroundColor: '#E8EEFF',
     borderTopWidth: 0.5,
-    borderTopColor: '#EEECe6',
+    borderTopColor: H.hairline,
     paddingTop: 8,
   },
   navItem: {
@@ -915,7 +1292,7 @@ const rs = StyleSheet.create({
   navActiveBar: {
     width: 16,
     height: 2,
-    backgroundColor: '#1A6B4A',
+    backgroundColor: H.purple,
     borderRadius: 2,
   },
   navLabel: {
@@ -923,7 +1300,7 @@ const rs = StyleSheet.create({
     color: '#9C9A92',
   },
   navLabelActive: {
-    color: '#1A6B4A',
+    color: H.purple,
     fontWeight: '600',
   },
 
@@ -936,7 +1313,7 @@ const rs = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#1A6B4A',
+    backgroundColor: H.navy,
     paddingHorizontal: 18,
   },
   toolbarLeft: {
@@ -948,6 +1325,15 @@ const rs = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: '#fff',
+  },
+  toolbarSelectAll: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  toolbarSelectAllText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.85)',
   },
   toolbarDeleteChip: {
     flexDirection: 'row',
@@ -967,7 +1353,7 @@ const rs = StyleSheet.create({
     color: '#fff',
   },
 
-  // Loading / empty
+  // Loading / small empty
   centerWrap: {
     flex: 1,
     justifyContent: 'center',
@@ -978,7 +1364,7 @@ const rs = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: 16,
-    backgroundColor: '#EFF9F4',
+    backgroundColor: H.purpleLight,
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 16,
@@ -994,6 +1380,79 @@ const rs = StyleSheet.create({
     color: '#9C9A92',
     textAlign: 'center',
     lineHeight: 20,
+  },
+
+  // Full "No Activity Yet" empty screen
+  emptyScreen: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: spacing.screenPadding,
+    paddingTop: 48,
+  },
+  emptyIconLg: {
+    width: 72,
+    height: 72,
+    borderRadius: 20,
+    backgroundColor: H.purpleLight,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+  emptyTitleLg: {
+    fontSize: 19,
+    fontWeight: '800',
+    color: H.ink,
+    marginBottom: 8,
+  },
+  emptySubLg: {
+    fontSize: 13,
+    color: H.sub,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  startTripBtn: {
+    alignSelf: 'stretch',
+    backgroundColor: H.purple,
+    borderRadius: 14,
+    paddingVertical: 15,
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  startTripBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  returnLink: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: H.purple,
+    marginBottom: 32,
+  },
+  infoChipsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    alignSelf: 'stretch',
+  },
+  infoChip: {
+    flex: 1,
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    borderWidth: 0.5,
+    borderColor: H.hairline,
+    padding: 14,
+    gap: 6,
+  },
+  infoChipTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: H.ink,
+  },
+  infoChipSub: {
+    fontSize: 11,
+    color: H.sub,
+    lineHeight: 15,
   },
 });
 

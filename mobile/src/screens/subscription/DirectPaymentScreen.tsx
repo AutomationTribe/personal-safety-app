@@ -11,19 +11,24 @@ import { WebView, WebViewNavigation } from 'react-native-webview';
 import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { CommonActions, RouteProp } from '@react-navigation/native';
 import { supabase } from '../../lib/supabase';
 import { colors, fontSizes, spacing } from '../../styles/tokens';
 import { AppStackParamList } from '../../navigation/AppNavigator';
 
 type Props = {
   navigation: NativeStackNavigationProp<AppStackParamList, 'DirectPayment'>;
+  route: RouteProp<AppStackParamList, 'DirectPayment'>;
 };
+
+const PLAN_CONFIG = {
+  basic: { label: 'Essential Safety', planName: 'Essential Safety Plan', price: '₦20,000' },
+  elite: { label: 'Complete Peace of Mind', planName: 'Elite Plan', price: '₦35,000' },
+} as const;
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
 console.log('[DirectPayment] BACKEND_URL:', BACKEND_URL);
 
-// This matches the callback_url sent to Paystack in /init.
-// The WebView intercepts navigation to this URL to detect payment completion.
 const PAYSTACK_CALLBACK_HOST = 'hadin.app';
 
 async function getAuthToken(): Promise<string | null> {
@@ -31,47 +36,42 @@ async function getAuthToken(): Promise<string | null> {
   return session?.access_token ?? null;
 }
 
-const DirectPaymentScreen = ({ navigation }: Props) => {
+const DirectPaymentScreen = ({ navigation, route }: Props) => {
   const insets = useSafeAreaInsets();
+  const { plan } = route.params;
+  const planConfig = PLAN_CONFIG[plan];
 
   const [initializing, setInitializing] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
   const [pendingReference, setPendingReference] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
 
   // ── Step 1: Initialize Paystack transaction ───────────────────────────────
 
-  const handlePay = async () => {
+  const handleConfirm = async () => {
     setInitializing(true);
     setError('');
 
     try {
       const token = await getAuthToken();
-      console.log('[Pay] token present:', !!token);
-
       if (!token) throw new Error('Not authenticated');
 
-      const url = `${BACKEND_URL}/api/v1/payments/init`;
-      console.log('[Pay] calling:', url);
-
-      const res = await fetch(url, {
+      const res = await fetch(`${BACKEND_URL}/api/v1/payments/init`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
+        body: JSON.stringify({ plan }),
       });
-
-      console.log('[Pay] response status:', res.status);
 
       const data = await res.json() as {
         authorization_url?: string;
         reference?: string;
         error?: string;
       };
-
-      console.log('[Pay] response body:', JSON.stringify(data));
 
       if (!res.ok || !data.authorization_url) {
         throw new Error(data.error ?? 'Could not start payment');
@@ -80,7 +80,6 @@ const DirectPaymentScreen = ({ navigation }: Props) => {
       setPendingReference(data.reference ?? null);
       setAuthorizationUrl(data.authorization_url);
     } catch (err) {
-      console.error('[Pay] error:', err);
       const msg = err instanceof Error ? err.message : 'Payment could not be started';
       setError(msg);
     } finally {
@@ -92,14 +91,13 @@ const DirectPaymentScreen = ({ navigation }: Props) => {
 
   const handleWebViewNavigation = (state: WebViewNavigation) => {
     if (state.url.includes(PAYSTACK_CALLBACK_HOST)) {
-      // Paystack is redirecting to our callback — extract the reference
       const url = new URL(state.url);
       const reference =
         url.searchParams.get('reference') ??
         url.searchParams.get('trxref') ??
         pendingReference;
 
-      setAuthorizationUrl(null); // close WebView
+      setAuthorizationUrl(null);
       if (reference) {
         void handleVerify(reference);
       } else {
@@ -116,8 +114,6 @@ const DirectPaymentScreen = ({ navigation }: Props) => {
 
     try {
       const token = await getAuthToken();
-      console.log('[Verify] reference:', reference);
-
       if (!token) throw new Error('Not authenticated');
 
       const res = await fetch(`${BACKEND_URL}/api/v1/payments/verify`, {
@@ -129,17 +125,14 @@ const DirectPaymentScreen = ({ navigation }: Props) => {
         body: JSON.stringify({ reference }),
       });
 
-      console.log('[Verify] status:', res.status);
       const data = await res.json() as { success?: boolean; error?: string };
-      console.log('[Verify] body:', JSON.stringify(data));
 
       if (!res.ok || !data.success) {
         throw new Error(data.error ?? 'Payment could not be confirmed');
       }
 
-      navigation.navigate('Success', { type: 'subscriber' });
+      setShowSuccessModal(true);
     } catch (err) {
-      console.error('[Verify] error:', err);
       const msg = err instanceof Error ? err.message : 'Could not confirm payment';
       setError(msg);
     } finally {
@@ -147,18 +140,28 @@ const DirectPaymentScreen = ({ navigation }: Props) => {
     }
   };
 
+  const busy = initializing || verifying;
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <View style={styles.root}>
-      {/* ── Green header ── */}
-      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
-        <Pressable style={styles.backBtn} onPress={() => navigation.goBack()} hitSlop={12}>
-          <Feather name="arrow-left" size={18} color="rgba(255,255,255,0.6)" />
+      {/* ── Nav bar ── */}
+      <View style={[styles.navBar, { paddingTop: insets.top + 4 }]}>
+        <Pressable
+          style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
+          onPress={() => navigation.goBack()}
+          hitSlop={12}
+        >
+          <Feather name="chevron-left" size={18} color="#111827" />
           <Text style={styles.backText}>Back</Text>
         </Pressable>
-        <Text style={styles.headline}>Subscribe to Hadin Pro</Text>
-        <Text style={styles.headerSub}>₦25,000/year · Cancel anytime</Text>
+      </View>
+
+      {/* ── Title section ── */}
+      <View style={styles.titleSection}>
+        <Text style={styles.headline}>{planConfig.label}</Text>
+        <Text style={styles.headlineSub}>{planConfig.price}/year · Cancel anytime</Text>
       </View>
 
       {/* ── Body ── */}
@@ -167,7 +170,7 @@ const DirectPaymentScreen = ({ navigation }: Props) => {
         <View style={styles.card}>
           <View style={styles.summaryRow}>
             <Text style={styles.summaryKey}>Plan</Text>
-            <Text style={styles.summaryVal}>Hadin Pro</Text>
+            <Text style={styles.summaryVal}>{planConfig.label}</Text>
           </View>
           <View style={styles.summaryRow}>
             <Text style={styles.summaryKey}>Billing</Text>
@@ -175,23 +178,14 @@ const DirectPaymentScreen = ({ navigation }: Props) => {
           </View>
           <View style={[styles.summaryRow, styles.summaryTotalRow]}>
             <Text style={styles.summaryKey}>Charged today</Text>
-            <Text style={styles.summaryTotal}>₦25,000</Text>
+            <Text style={styles.summaryTotal}>{planConfig.price}</Text>
           </View>
         </View>
 
         {/* Paystack trust badge */}
         <View style={styles.secureRow}>
-          <Feather name="lock" size={13} color={colors.brand.textSecondary} />
+          <Feather name="lock" size={13} color="#6B7280" />
           <Text style={styles.secureText}>Secured by Paystack · PCI-DSS compliant</Text>
-        </View>
-
-        {/* What happens */}
-        <View style={styles.infoCard}>
-          <Feather name="info" size={14} color={colors.brand.primary} style={styles.infoIcon} />
-          <Text style={styles.infoText}>
-            Tapping "Pay" opens Paystack's secure checkout. Enter your card details there —
-            your card number never touches our servers.
-          </Text>
         </View>
 
         {/* Error */}
@@ -202,33 +196,62 @@ const DirectPaymentScreen = ({ navigation }: Props) => {
           </View>
         ) : null}
 
-        {/* Pay button */}
-        <Pressable
-          style={({ pressed }) => [
-            styles.payBtn,
-            (initializing || verifying) && styles.payBtnDisabled,
-            pressed && !initializing && !verifying && styles.pressed,
-          ]}
-          onPress={handlePay}
-          disabled={initializing || verifying}
-        >
-          {initializing || verifying ? (
-            <View style={styles.payBtnInner}>
-              <ActivityIndicator color={colors.white} size="small" />
-              <Text style={styles.payBtnText}>
-                {verifying ? 'Confirming payment…' : 'Opening checkout…'}
-              </Text>
-            </View>
-          ) : (
-            <Text style={styles.payBtnText}>Pay ₦25,000 →</Text>
-          )}
-        </Pressable>
-
         <Text style={styles.legal}>
-          You'll be charged ₦25,000/year until cancelled.
+          You'll be charged {planConfig.price}/year until cancelled.
           Cancel anytime from Settings.
         </Text>
+
+        {/* Confirm button */}
+        <Pressable
+          style={({ pressed }) => [
+            styles.confirmBtn,
+            busy && styles.confirmBtnDisabled,
+            pressed && !busy && styles.pressed,
+          ]}
+          onPress={handleConfirm}
+          disabled={busy}
+        >
+          {busy ? (
+            <ActivityIndicator color={colors.white} size="small" />
+          ) : (
+            <Text style={styles.confirmBtnText}>
+              {verifying ? 'Confirming…' : 'Confirm Subscription'}
+            </Text>
+          )}
+        </Pressable>
       </View>
+
+      {/* ── Subscription Activated modal ── */}
+      <Modal
+        visible={showSuccessModal}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+      >
+        <View style={styles.successOverlay}>
+          <View style={styles.successCard}>
+            <View style={styles.successIconCircle}>
+              <Feather name="check" size={32} color={colors.white} />
+            </View>
+            <Text style={styles.successTitle}>Subscription Activated</Text>
+            <Text style={styles.successBody}>
+              Your account has been upgraded to the {planConfig.planName}. You now have full
+              access to all premium safety features.
+            </Text>
+            <Pressable
+              style={({ pressed }) => [styles.successBtn, pressed && styles.pressed]}
+              onPress={() => {
+                setShowSuccessModal(false);
+                navigation.dispatch(
+                  CommonActions.reset({ index: 0, routes: [{ name: 'Home' }] }),
+                );
+              }}
+            >
+              <Text style={styles.successBtnText}>Go to Dashboard</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       {/* ── Paystack WebView modal ── */}
       <Modal
@@ -237,7 +260,6 @@ const DirectPaymentScreen = ({ navigation }: Props) => {
         onRequestClose={() => setAuthorizationUrl(null)}
       >
         <View style={[styles.webViewRoot, { paddingTop: insets.top }]}>
-          {/* Close bar */}
           <View style={styles.webViewHeader}>
             <Pressable
               style={styles.webViewClose}
@@ -272,65 +294,69 @@ const DirectPaymentScreen = ({ navigation }: Props) => {
 };
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.brand.bgSurface },
+  root: { flex: 1, backgroundColor: '#F8F9FB' },
 
-  header: {
-    backgroundColor: colors.brand.primary,
-    paddingHorizontal: spacing.screenPadding,
-    paddingBottom: spacing.gap20,
+  navBar: {
+    paddingHorizontal: 22,
+    paddingBottom: 14,
+    backgroundColor: '#F8F9FB',
   },
-  backBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 12 },
-  backText: { fontSize: fontSizes.caption, color: 'rgba(255,255,255,0.6)' },
+  backBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, alignSelf: 'flex-start' },
+  backText: { fontSize: 16, color: '#111827', fontWeight: '500' },
+
+  titleSection: {
+    paddingHorizontal: 22,
+    paddingTop: 10,
+    paddingBottom: 24,
+  },
   headline: {
-    fontSize: 20,
+    fontSize: 23,
     fontWeight: '800',
-    color: colors.white,
-    letterSpacing: -0.4,
-    marginBottom: 4,
+    color: '#111827',
+    marginBottom: 6,
   },
-  headerSub: { fontSize: fontSizes.caption, color: 'rgba(255,255,255,0.6)' },
+  headlineSub: {
+    fontSize: 14,
+    color: '#111827',
+    fontWeight: '500',
+  },
 
-  body: { padding: spacing.screenPadding, gap: spacing.gap12 },
+  body: { paddingHorizontal: 18, gap: 16 },
 
   card: {
     backgroundColor: colors.white,
-    borderRadius: 14,
-    padding: spacing.cardPadding,
-    borderWidth: 0.5,
-    borderColor: '#EEECe6',
+    borderRadius: 7,
+    paddingHorizontal: 24,
+    paddingVertical: 18,
+    borderWidth: 1,
+    borderColor: '#EDF0F4',
+    shadowColor: '#111827',
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
   },
   summaryRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingVertical: 5,
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#F4F3EF',
+    alignItems: 'center',
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F5F8',
   },
-  summaryTotalRow: { borderBottomWidth: 0, paddingTop: 9, marginTop: 3 },
-  summaryKey: { fontSize: fontSizes.caption, color: colors.brand.textSecondary },
-  summaryVal: { fontSize: fontSizes.caption, fontWeight: '600', color: colors.brand.textPrimary },
-  summaryTotal: { fontSize: 15, fontWeight: '800', color: colors.brand.primary },
+  summaryTotalRow: { borderBottomWidth: 0, paddingTop: 18, paddingBottom: 6 },
+  summaryKey: { fontSize: 14, color: '#546780', fontWeight: '500' },
+  summaryVal: { fontSize: 15, fontWeight: '800', color: '#111827' },
+  summaryTotal: { fontSize: 21, fontWeight: '800', color: '#1F6B45' },
 
-  secureRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  secureText: { fontSize: 10, color: colors.brand.textSecondary },
-
-  infoCard: {
+  secureRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 8,
-    backgroundColor: colors.brand.light,
-    borderRadius: 10,
-    padding: 12,
-    borderWidth: 0.5,
-    borderColor: colors.brand.border,
+    paddingHorizontal: 6,
+    marginTop: 2,
   },
-  infoIcon: { flexShrink: 0, marginTop: 1 },
-  infoText: {
-    flex: 1,
-    fontSize: fontSizes.small,
-    color: colors.brand.primary,
-    lineHeight: 17,
-  },
+  secureText: { fontSize: 12, color: '#6B7280', fontWeight: '600' },
 
   errorBox: {
     flexDirection: 'row',
@@ -344,18 +370,83 @@ const styles = StyleSheet.create({
   },
   errorText: { flex: 1, color: colors.brand.sos, fontSize: fontSizes.caption, lineHeight: 18 },
 
-  payBtn: {
-    backgroundColor: colors.brand.primary,
-    borderRadius: 12,
-    paddingVertical: 15,
-    alignItems: 'center',
+  legal: {
+    fontSize: 12,
+    color: '#7D8AA0',
+    lineHeight: 18,
+    paddingHorizontal: 6,
+    marginTop: -2,
   },
-  payBtnInner: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  payBtnDisabled: { opacity: 0.7 },
-  payBtnText: { fontSize: fontSizes.body, fontWeight: '700', color: colors.white },
+
+  confirmBtn: {
+    backgroundColor: '#5317CF',
+    borderRadius: 7,
+    paddingVertical: 17,
+    alignItems: 'center',
+    marginTop: 2,
+    shadowColor: '#5317CF',
+    shadowOpacity: 0.18,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+  },
+  confirmBtnDisabled: { opacity: 0.7 },
+  confirmBtnText: { fontSize: 16, fontWeight: '800', color: colors.white },
+
   pressed: { opacity: 0.8 },
 
-  legal: { fontSize: 10, color: '#B4B2A9', textAlign: 'center', lineHeight: 16 },
+  // Success modal
+  successOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  successCard: {
+    backgroundColor: colors.white,
+    borderRadius: 20,
+    paddingHorizontal: 28,
+    paddingTop: 32,
+    paddingBottom: 28,
+    alignItems: 'center',
+    width: '100%',
+  },
+  successIconCircle: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    backgroundColor: '#4F46E5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  successTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: colors.brand.textPrimary,
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  successBody: {
+    fontSize: fontSizes.caption,
+    color: colors.brand.textSecondary,
+    textAlign: 'center',
+    lineHeight: 21,
+    marginBottom: 24,
+  },
+  successBtn: {
+    width: '100%',
+    backgroundColor: '#4F46E5',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  successBtnText: {
+    fontSize: fontSizes.body,
+    fontWeight: '700',
+    color: colors.white,
+  },
 
   // WebView modal
   webViewRoot: { flex: 1, backgroundColor: colors.white },

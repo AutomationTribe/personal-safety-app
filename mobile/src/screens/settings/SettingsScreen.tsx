@@ -26,7 +26,9 @@ interface ProfileData {
   name: string;
   email: string;
   subscriptionStatus: string;
+  plan: string;
   trialEnd: string | null;
+  nextBillingDate: string | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -39,19 +41,19 @@ function initials(name: string): string {
     .join('');
 }
 
-function trialDaysRemaining(trialEnd: string | null): number {
-  if (!trialEnd) return 0;
-  const ms = new Date(trialEnd).getTime() - Date.now();
-  return Math.max(0, Math.ceil(ms / (1000 * 60 * 60 * 24)));
+function formatDate(iso: string | null): string {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleDateString('en-NG', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
 }
 
-function badgeLabel(status: string, trialEnd: string | null): string | null {
-  if (status === 'active') return 'Hadin Pro · Active';
-  if (status === 'trial') {
-    const days = trialDaysRemaining(trialEnd);
-    return `Free trial · ${days} day${days !== 1 ? 's' : ''} remaining`;
-  }
-  return null;
+function planBadgeLabel(plan: string): string {
+  if (plan === 'elite') return 'ELITE PLAN';
+  if (plan === 'basic') return 'BASIC PLAN';
+  return 'TRIAL';
 }
 
 // ── SettingsScreen ────────────────────────────────────────────────────────────
@@ -64,7 +66,9 @@ const SettingsScreen = () => {
     name: '',
     email: '',
     subscriptionStatus: 'free',
+    plan: 'free',
     trialEnd: null,
+    nextBillingDate: null,
   });
   const [showLogoutModal, setShowLogoutModal] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -82,18 +86,28 @@ const SettingsScreen = () => {
 
       const { data } = await supabase
         .from('profiles')
-        .select('subscription_status, trial_end')
+        .select('subscription_status, plan, trial_end, next_billing_date')
         .eq('id', user.id)
         .single();
+
+      type Row = {
+        subscription_status: string;
+        plan: string | null;
+        trial_end: string | null;
+        next_billing_date: string | null;
+      };
+      const row = data as Row | null;
 
       setProfile({
         name,
         email,
-        subscriptionStatus: (data as { subscription_status: string; trial_end: string | null } | null)?.subscription_status ?? 'free',
-        trialEnd: (data as { subscription_status: string; trial_end: string | null } | null)?.trial_end ?? null,
+        subscriptionStatus: row?.subscription_status ?? 'free',
+        plan: row?.plan ?? 'free',
+        trialEnd: row?.trial_end ?? null,
+        nextBillingDate: row?.next_billing_date ?? null,
       });
     } catch {
-      // Non-fatal — show empty state
+      // Non-fatal — show defaults
     }
   }, []);
 
@@ -106,135 +120,132 @@ const SettingsScreen = () => {
   const handleLogout = async () => {
     setLoggingOut(true);
     try {
-      // Stop any active trip tracking and flush the location queue
       await stopTracking().catch((e) => console.warn('[Settings] stopTracking error:', e));
       await flushQueue().catch((e) => console.warn('[Settings] flushQueue error:', e));
-
-      // Revoke refresh token server-side — critical at scale
       await supabase.auth.signOut();
     } catch (e) {
       console.warn('[Settings] signOut error:', e);
     } finally {
-      // Always clear local storage even if signOut had an error
       await AsyncStorage.clear().catch((e) => console.warn('[Settings] AsyncStorage.clear error:', e));
       setLoggingOut(false);
-      // AppNavigator's onAuthStateChange detects the cleared session
-      // and switches the root to AuthStack (Login). No explicit navigate needed.
     }
   };
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Derived display values ────────────────────────────────────────────────
 
-  const badge = badgeLabel(profile.subscriptionStatus, profile.trialEnd);
   const displayName = profile.name || 'Traveller';
+  const isActive = profile.subscriptionStatus === 'active';
+  const isTrial = profile.subscriptionStatus === 'trial';
+  const hasSubscription = isActive || isTrial;
+
+  const billingLabel = isTrial
+    ? `Trial ends ${formatDate(profile.trialEnd)}`
+    : `Next Billing: ${formatDate(profile.nextBillingDate)}`;
+
+  const planPrice = profile.plan === 'basic' ? '₦20,000/yr' : '₦35,000/yr';
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <View style={styles.root}>
-      {/* ── Header ── */}
-      <View style={[styles.header, { paddingTop: insets.top + 10 }]}>
-        <Text style={styles.headerTitle}>Settings</Text>
-        <Text style={styles.headerSub}>Account and preferences</Text>
-      </View>
-
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 80 }]}
         showsVerticalScrollIndicator={false}
       >
-        {/* ── Profile card ── */}
-        <View style={styles.card}>
-          <View style={styles.profileRow}>
-            <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{initials(displayName) || '?'}</Text>
-            </View>
-            <View style={styles.profileInfo}>
-              <Text style={styles.profileName}>{displayName}</Text>
-              {profile.email ? (
-                <Text style={styles.profileEmail}>{profile.email}</Text>
-              ) : null}
-              {badge ? (
-                <View style={styles.subBadge}>
-                  <View style={styles.subBadgeDot} />
-                  <Text style={styles.subBadgeText}>{badge}</Text>
-                </View>
-              ) : null}
-            </View>
-          </View>
+        {/* ── Page title ── */}
+        <View style={[styles.pageHeader, { paddingTop: insets.top + 10 }]}>
+          <Text style={styles.pageTitle}>Profile</Text>
         </View>
 
-        {/* ── Account section ── */}
-        <View style={styles.sectionLabel}>
-          <Text style={styles.sectionLabelText}>ACCOUNT</Text>
-        </View>
+        {/* ── Subscription card ── */}
+        {hasSubscription ? (
+          <View style={styles.subCard}>
+            <View style={styles.subCardTop}>
+              <View>
+                <View style={styles.planBadge}>
+                  <Text style={styles.planBadgeText}>{planBadgeLabel(profile.plan)}</Text>
+                </View>
+                <Text style={styles.subCardTitle}>
+                  {isTrial ? 'Trial Active' : 'Active Protection'}
+                </Text>
+                <Text style={styles.subCardPrice}>{planPrice}</Text>
+              </View>
+              <View style={styles.subCardShield}>
+                <Feather name="shield" size={28} color="rgba(255,255,255,0.2)" />
+              </View>
+            </View>
+            <View style={styles.subCardDivider} />
+            <Pressable
+              style={styles.subCardBottom}
+              onPress={() => navigation.navigate('Subscription')}
+            >
+              <Feather name="calendar" size={13} color="rgba(255,255,255,0.5)" />
+              <Text style={styles.subCardBilling}>{billingLabel}</Text>
+              <Text style={styles.subCardManage}>Manage Plan {'>'}</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <Pressable
+            style={styles.upgradeBanner}
+            onPress={() => navigation.navigate('Subscription')}
+          >
+            <Feather name="shield" size={18} color={colors.brand.primary} />
+            <View style={styles.upgradeBannerText}>
+              <Text style={styles.upgradeBannerTitle}>No active plan</Text>
+              <Text style={styles.upgradeBannerSub}>Tap to choose a protection plan</Text>
+            </View>
+            <Feather name="chevron-right" size={16} color={colors.brand.primary} />
+          </Pressable>
+        )}
+
+        {/* ── Account settings section ── */}
+        <Text style={styles.sectionLabel}>ACCOUNT SETTINGS</Text>
         <View style={styles.card}>
           <SettingsRow
+            icon="user"
             iconBg="#E6F1FB"
             iconColor="#0C447C"
-            icon="user"
-            label="Edit profile"
-            desc="Update your name and photo"
+            label="Edit Profile"
+            desc="Update your personal information"
           />
           <View style={styles.rowDivider} />
           <SettingsRow
+            icon="bell"
             iconBg="#FFF3E0"
             iconColor="#E65100"
-            icon="bell"
-            label="Notifications"
-            desc="Alerts, trip updates, and reminders"
+            label="Notification Settings"
+            desc="Manage alert and security sounds"
           />
           <View style={styles.rowDivider} />
           <SettingsRow
+            icon="shield"
             iconBg={colors.brand.light}
             iconColor={colors.brand.primary}
-            icon="shield"
-            label="Subscription"
-            desc={badge ?? 'Free plan'}
-            onPress={() => navigation.navigate('Subscription')}
+            label="Security & Privacy"
+            desc="Password, 2FA, and app locking"
           />
         </View>
 
-        {/* ── Support section ── */}
-        <View style={styles.sectionLabel}>
-          <Text style={styles.sectionLabelText}>SUPPORT</Text>
-        </View>
-        <View style={styles.card}>
-          <SettingsRow
-            iconBg="#E0F7FA"
-            iconColor="#006064"
-            icon="help-circle"
-            label="Help & FAQ"
-            desc="Guides, tips, and answers"
-          />
-          <View style={styles.rowDivider} />
-          <SettingsRow
-            iconBg="#EDE7F6"
-            iconColor="#4527A0"
-            icon="file-text"
-            label="Privacy Policy"
-            desc="How we handle your data"
-          />
-        </View>
+        {/* ── Log out button ── */}
+        <Pressable
+          style={({ pressed }) => [styles.logoutBtn, pressed && styles.pressed]}
+          onPress={() => setShowLogoutModal(true)}
+        >
+          <Feather name="log-out" size={16} color={colors.brand.sos} />
+          <Text style={styles.logoutBtnText}>Log Out</Text>
+        </Pressable>
 
-        {/* ── Danger section ── */}
-        <View style={styles.card}>
-          <SettingsRow
-            iconBg="#FDEDEC"
-            iconColor="#C0392B"
-            icon="log-out"
-            label="Log out"
-            desc="Sign out of this device"
-            labelStyle={styles.logoutLabel}
-            onPress={() => setShowLogoutModal(true)}
-          />
-        </View>
+        {/* ── Version ── */}
+        <Text style={styles.version}>VERSION 1.0.0</Text>
       </ScrollView>
 
       {/* ── Bottom tab bar ── */}
       <View style={[styles.tabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
-        <TabItem icon="home" label="Home" onPress={() => navigation.navigate('Home')} />
-        <TabItem icon="map" label="Routes" onPress={() => navigation.navigate('Routes')} />
+        <TabItem icon="grid" label="Dashboard" onPress={() => navigation.navigate('Home')} />
         <TabItem icon="users" label="Circle" onPress={() => navigation.navigate('Circle')} />
-        <TabItem icon="settings" label="Settings" active />
+        <TabItem icon="clock" label="History" onPress={() => navigation.navigate('Routes')} />
+        <TabItem icon="user" label="Profile" active />
       </View>
 
       {/* ── Logout confirmation sheet ── */}
@@ -251,16 +262,15 @@ const SettingsScreen = () => {
 // ── Settings row ──────────────────────────────────────────────────────────────
 
 interface SettingsRowProps {
+  icon: React.ComponentProps<typeof Feather>['name'];
   iconBg: string;
   iconColor: string;
-  icon: React.ComponentProps<typeof Feather>['name'];
   label: string;
   desc: string;
-  labelStyle?: object;
   onPress?: () => void;
 }
 
-const SettingsRow = ({ iconBg, iconColor, icon, label, desc, labelStyle, onPress }: SettingsRowProps) => (
+const SettingsRow = ({ icon, iconBg, iconColor, label, desc, onPress }: SettingsRowProps) => (
   <Pressable
     style={({ pressed }) => [styles.settingsRow, pressed && onPress && styles.rowPressed]}
     onPress={onPress}
@@ -270,7 +280,7 @@ const SettingsRow = ({ iconBg, iconColor, icon, label, desc, labelStyle, onPress
       <Feather name={icon} size={16} color={iconColor} />
     </View>
     <View style={styles.rowBody}>
-      <Text style={[styles.rowLabel, labelStyle]}>{label}</Text>
+      <Text style={styles.rowLabel}>{label}</Text>
       <Text style={styles.rowDesc}>{desc}</Text>
     </View>
     <Feather name="chevron-right" size={16} color={colors.brand.textSecondary} />
@@ -287,39 +297,23 @@ interface LogoutSheetProps {
 }
 
 const LogoutSheet = ({ visible, loggingOut, onStay, onConfirm }: LogoutSheetProps) => (
-  <Modal
-    visible={visible}
-    transparent
-    animationType="slide"
-    onRequestClose={onStay}
-  >
+  <Modal visible={visible} transparent animationType="slide" onRequestClose={onStay}>
     <View style={sheet.overlay}>
       <View style={sheet.container}>
-        {/* Handle bar */}
         <View style={sheet.handle} />
-
-        {/* Icon */}
         <View style={sheet.iconWrap}>
           <Feather name="log-out" size={26} color="#C0392B" />
         </View>
-
-        {/* Title */}
         <Text style={sheet.title}>Log out of Hadin?</Text>
-
-        {/* Body */}
         <Text style={sheet.body}>
           You'll be signed out of this device. Any active trip will continue running until you end it.
         </Text>
-
-        {/* Warning strip */}
         <View style={sheet.warningStrip}>
           <Feather name="alert-triangle" size={14} color="#B7880A" style={sheet.warningIcon} />
           <Text style={sheet.warningText}>
             If you have an active trip, your circle will no longer receive updates after logout.
           </Text>
         </View>
-
-        {/* Buttons */}
         <View style={sheet.btnRow}>
           <Pressable
             style={({ pressed }) => [sheet.stayBtn, pressed && { opacity: 0.8 }]}
@@ -340,7 +334,6 @@ const LogoutSheet = ({ visible, loggingOut, onStay, onConfirm }: LogoutSheetProp
             )}
           </Pressable>
         </View>
-
         {loggingOut ? (
           <Text style={sheet.signingOutText}>Signing you out…{'\n'}Clearing session securely</Text>
         ) : null}
@@ -375,78 +368,110 @@ const TabItem = ({ icon, label, active = false, onPress }: TabItemProps) => (
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.brand.bgSurface },
 
-  header: {
-    backgroundColor: colors.white,
+  scroll: { flex: 1 },
+  scrollContent: {
     paddingHorizontal: spacing.screenPadding,
-    paddingBottom: spacing.gap12,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.brand.border,
   },
-  headerTitle: {
-    fontSize: 20,
+
+  pageHeader: {
+    paddingBottom: spacing.gap16,
+  },
+  pageTitle: {
+    fontSize: 22,
     fontWeight: '800',
     color: colors.brand.textPrimary,
     letterSpacing: -0.3,
   },
-  headerSub: {
+
+  // Subscription card (active/trial)
+  subCard: {
+    backgroundColor: '#0F172A',
+    borderRadius: 16,
+    padding: spacing.cardPadding,
+    marginBottom: spacing.gap16,
+  },
+  subCardTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  planBadge: {
+    backgroundColor: '#1E293B',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    alignSelf: 'flex-start',
+    marginBottom: 6,
+  },
+  planBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.7)',
+    letterSpacing: 0.8,
+  },
+  subCardTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#fff',
+    marginBottom: 3,
+  },
+  subCardPrice: {
+    fontSize: fontSizes.caption,
+    color: 'rgba(255,255,255,0.45)',
+  },
+  subCardShield: { opacity: 0.4 },
+  subCardDivider: { height: 0.5, backgroundColor: 'rgba(255,255,255,0.1)', marginBottom: 12 },
+  subCardBottom: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  subCardBilling: {
+    flex: 1,
     fontSize: fontSizes.small,
+    color: 'rgba(255,255,255,0.5)',
+  },
+  subCardManage: {
+    fontSize: fontSizes.small,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.7)',
+  },
+
+  // No subscription banner
+  upgradeBanner: {
+    backgroundColor: colors.brand.light,
+    borderRadius: 14,
+    padding: spacing.cardPadding,
+    borderWidth: 0.5,
+    borderColor: colors.brand.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.gap12,
+    marginBottom: spacing.gap16,
+  },
+  upgradeBannerText: { flex: 1 },
+  upgradeBannerTitle: { fontSize: fontSizes.caption, fontWeight: '700', color: colors.brand.primary },
+  upgradeBannerSub: { fontSize: fontSizes.small, color: colors.brand.textSecondary, marginTop: 2 },
+
+  // Section label
+  sectionLabel: {
+    fontSize: 10,
+    fontWeight: '700',
     color: colors.brand.textSecondary,
-    marginTop: 2,
+    letterSpacing: 0.8,
+    marginBottom: spacing.gap8,
   },
 
-  scroll: { flex: 1 },
-  scrollContent: {
-    paddingHorizontal: spacing.screenPadding,
-    paddingTop: spacing.gap16,
-  },
-
-  // Profile card
+  // Account card
   card: {
     backgroundColor: colors.white,
     borderRadius: 14,
     borderWidth: 0.5,
     borderColor: '#EEECe6',
     overflow: 'hidden',
-    marginBottom: 4,
+    marginBottom: spacing.gap16,
   },
-  profileRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.gap12,
-    padding: spacing.cardPadding,
-  },
-  avatar: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: colors.brand.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-    flexShrink: 0,
-  },
-  avatarText: { color: colors.white, fontSize: fontSizes.body, fontWeight: '700' },
-  profileInfo: { flex: 1, gap: 3 },
-  profileName: { fontSize: 14, fontWeight: '700', color: colors.brand.textPrimary },
-  profileEmail: { fontSize: fontSizes.small, color: colors.brand.textSecondary },
-  subBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    marginTop: 2,
-  },
-  subBadgeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#4ADE80' },
-  subBadgeText: { fontSize: 10, color: colors.brand.primary, fontWeight: '600' },
-
-  // Section label
-  sectionLabel: { paddingTop: spacing.gap12, paddingBottom: 6, paddingHorizontal: 4 },
-  sectionLabelText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: colors.brand.textSecondary,
-    letterSpacing: 0.8,
-  },
-
-  // Settings rows
   settingsRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -465,8 +490,35 @@ const styles = StyleSheet.create({
   rowBody: { flex: 1 },
   rowLabel: { fontSize: fontSizes.caption, fontWeight: '600', color: colors.brand.textPrimary },
   rowDesc: { fontSize: 11, color: colors.brand.textSecondary, marginTop: 2 },
-  logoutLabel: { color: '#C0392B' },
   rowDivider: { height: 0.5, backgroundColor: '#F4F3EF', marginLeft: 58 },
+
+  // Log out button
+  logoutBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: 12,
+    paddingVertical: 14,
+    backgroundColor: colors.white,
+    marginBottom: spacing.gap16,
+  },
+  logoutBtnText: {
+    fontSize: fontSizes.body,
+    fontWeight: '600',
+    color: colors.brand.sos,
+  },
+
+  version: {
+    fontSize: 10,
+    color: colors.brand.textSecondary,
+    textAlign: 'center',
+    marginBottom: spacing.gap8,
+  },
+
+  pressed: { opacity: 0.8 },
 
   // Tab bar
   tabBar: {
@@ -489,11 +541,7 @@ const styles = StyleSheet.create({
 });
 
 const sheet = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   container: {
     backgroundColor: colors.white,
     borderTopLeftRadius: 22,
@@ -546,12 +594,7 @@ const sheet = StyleSheet.create({
     marginBottom: 20,
   },
   warningIcon: { flexShrink: 0, marginTop: 1 },
-  warningText: {
-    flex: 1,
-    fontSize: fontSizes.small,
-    color: '#856800',
-    lineHeight: 17,
-  },
+  warningText: { flex: 1, fontSize: fontSizes.small, color: '#856800', lineHeight: 17 },
   btnRow: { flexDirection: 'row', gap: spacing.gap12 },
   stayBtn: {
     flex: 1,

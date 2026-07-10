@@ -10,29 +10,41 @@ import {
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { supabase } from '../../lib/supabase';
 import { colors, fontSizes, spacing } from '../../styles/tokens';
 import { AppStackParamList } from '../../navigation/AppNavigator';
+import HadinLogo from '../../components/HadinLogo';
 
 type Props = {
   navigation: NativeStackNavigationProp<AppStackParamList, 'Subscription'>;
 };
 
-const EXIT_INTERCEPT_KEY = 'hadin_exit_intercept_shown';
+type ModalTrigger = 'logout' | 'back' | 'tab';
 
-const FEATURES: string[] = [
-  'Instant SOS alerts to your circle',
-  'SMS fallback — works without internet',
-  'Trip check-ins and departure alerts',
-  'Unlimited circle members',
-  'Emergency contact notifications on SOS',
+const BASIC_FEATURES = [
+  'SOS Trigger',
+  'Live Location Sharing',
+  '1 Emergency Contact',
+];
+
+const ELITE_FEATURES = [
+  '24/7 AI Monitoring',
+  'Family Circle (up to 5)',
+  'Priority Emergency Response',
+  'Safety Insights',
 ];
 
 const SubscriptionScreen = ({ navigation }: Props) => {
   const insets = useSafeAreaInsets();
-  const [showExitSheet, setShowExitSheet] = useState(false);
+  const [modalTrigger, setModalTrigger] = useState<ModalTrigger | null>(null);
   const interceptShownRef = useRef(false);
+
+  const showTrialModal = (trigger: ModalTrigger) => {
+    setModalTrigger(trigger);
+  };
+
+  const hideModal = () => setModalTrigger(null);
 
   useEffect(() => {
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -40,123 +52,169 @@ const SubscriptionScreen = ({ navigation }: Props) => {
         BackHandler.exitApp();
         return true;
       }
-
-      void AsyncStorage.getItem(EXIT_INTERCEPT_KEY).then((val) => {
-        if (val) {
-          BackHandler.exitApp();
-        } else {
-          void AsyncStorage.setItem(EXIT_INTERCEPT_KEY, 'true');
-          interceptShownRef.current = true;
-          setShowExitSheet(true);
-        }
-      });
-
+      interceptShownRef.current = true;
+      showTrialModal('back');
       return true;
     });
-
     return () => handler.remove();
   }, []);
 
+  const handleDecline = async () => {
+    hideModal();
+    if (modalTrigger === 'logout') {
+      await supabase.auth.signOut().catch(() => null);
+    } else if (modalTrigger === 'back') {
+      BackHandler.exitApp();
+    }
+    // 'tab' trigger: just dismiss — stay on screen
+  };
+
+  const handleAcceptTrial = () => {
+    hideModal();
+    navigation.navigate('TrialOffer');
+  };
+
+  const handleTabPress = (screen: keyof AppStackParamList) => {
+    if (screen === 'Home' || screen === 'Routes' || screen === 'Circle') {
+      showTrialModal('tab');
+    }
+  };
+
   return (
     <View style={styles.root}>
+      <View style={[styles.topBar, { paddingTop: insets.top + 4 }]}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+          style={({ pressed }) => [styles.topIconBtn, pressed && styles.pressed]}
+          onPress={() => showTrialModal('back')}
+        >
+          <Feather name="arrow-left" size={18} color={colors.brand.textPrimary} />
+        </Pressable>
+        <HadinLogo size={22} />
+      </View>
+
       <ScrollView
-        contentContainerStyle={styles.scroll}
+        contentContainerStyle={[
+          styles.scroll,
+          { paddingBottom: insets.bottom + 14 },
+        ]}
         showsVerticalScrollIndicator={false}
       >
-        {/* ── Green header ── */}
-        <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
-          <Text style={styles.eyebrow}>HADIN PRO</Text>
-          <Text style={styles.headline}>Peace of mind,{'\n'}always on.</Text>
+        <View style={styles.contentColumn}>
+        {/* ── Header ── */}
+        <View style={styles.header}>
+          <Text style={styles.headline}>Choose Your Protection</Text>
           <Text style={styles.headerSub}>
-            Keep your circle close and your location safe, every day.
+            Advanced safety solutions tailored to your lifestyle.
+            {'\n'}Stay protected wherever you go.
           </Text>
         </View>
 
-        {/* ── Body ── */}
-        <View style={styles.body}>
-          {/* Plan card */}
-          <View style={styles.planCard}>
-            <View style={styles.planTop}>
-              <Text style={styles.planName}>Hadin Pro</Text>
-              <View style={styles.priceRow}>
-                <Text style={styles.price}>$25</Text>
-                <Text style={styles.pricePer}>/year</Text>
-              </View>
-            </View>
-            <View style={styles.divider} />
-            {FEATURES.map((feat) => (
-              <View key={feat} style={styles.featRow}>
-                <View style={styles.featIcon}>
-                  <Feather name="check" size={10} color={colors.brand.primary} />
-                </View>
-                <Text style={styles.featText}>{feat}</Text>
-              </View>
-            ))}
+        {/* ── Basic plan card ── */}
+        <View style={styles.basicCard}>
+          <Text style={styles.planLabel}>STANDARD</Text>
+          <View style={styles.planTitleRow}>
+            <Text style={styles.planTitle}>Essential Safety</Text>
           </View>
-
-          {/* Subscribe */}
+          <View style={styles.priceRow}>
+            <Text style={styles.price}>₦20,000</Text>
+            <Text style={styles.pricePer}>/yr</Text>
+          </View>
+          <View style={styles.divider} />
+          {BASIC_FEATURES.map((feat) => (
+            <View key={feat} style={styles.featRow}>
+              <Feather name="check-circle" size={14} color={colors.brand.primary} />
+              <Text style={styles.featTextDark}>{feat}</Text>
+            </View>
+          ))}
           <Pressable
-            style={({ pressed }) => [styles.subscribeBtn, pressed && styles.pressed]}
-            onPress={() => navigation.navigate('DirectPayment')}
+            style={({ pressed }) => [styles.basicBtn, pressed && styles.pressed]}
+            onPress={() => navigation.navigate('DirectPayment', { plan: 'basic' })}
           >
-            <Text style={styles.subscribeBtnText}>Subscribe — $25/year</Text>
+            <Text style={styles.basicBtnText}>Select Basic Plan</Text>
           </Pressable>
+        </View>
 
-          {/* No thanks */}
+        {/* ── Elite plan card ── */}
+        <View style={styles.eliteCard}>
+          <View style={styles.eliteTopRow}>
+            <Text style={styles.elitePlanLabel}>PREMIUM PROTECTION</Text>
+            <View style={styles.recommendedBadge}>
+              <Text style={styles.recommendedText}>RECOMMENDED</Text>
+            </View>
+          </View>
+          <View style={styles.eliteTitleRow}>
+            <Text style={styles.eliteTitle}>Complete Peace of Mind</Text>
+          </View>
+          <View style={styles.elitePriceRow}>
+            <Text style={styles.elitePrice}>₦35,000</Text>
+            <Text style={styles.elitePricePer}>/yr</Text>
+          </View>
+          <Text style={styles.eliteEverything}>Everything in Basic, also:</Text>
+          {ELITE_FEATURES.map((feat) => (
+            <View key={feat} style={styles.featRow}>
+              <Feather name="check-circle" size={14} color="#4ADE80" />
+              <Text style={styles.featTextLight}>{feat}</Text>
+            </View>
+          ))}
           <Pressable
-            style={({ pressed }) => [styles.noThanksBtn, pressed && styles.pressed]}
-            onPress={() => navigation.navigate('TrialOffer')}
+            style={({ pressed }) => [styles.eliteBtn, pressed && styles.pressed]}
+            onPress={() => navigation.navigate('DirectPayment', { plan: 'elite' })}
           >
-            <Text style={styles.noThanksBtnText}>No thanks</Text>
+            <Text style={styles.eliteBtnText}>Select Elite Plan →</Text>
           </Pressable>
+        </View>
+
+        {/* ── Log out link ── */}
+        <Pressable
+          style={({ pressed }) => [styles.logoutLink, pressed && styles.pressed]}
+          onPress={() => showTrialModal('logout')}
+        >
+          <Feather name="log-out" size={13} color="#DC2626" />
+          <Text style={styles.logoutLinkText}>LOG OUT</Text>
+        </Pressable>
         </View>
       </ScrollView>
 
-      {/* ── Exit intercept sheet ── */}
+      {/* ── Bottom tab bar ── */}
+      <View style={[styles.tabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
+        <TabItem icon="grid" label="Dashboard" onPress={() => handleTabPress('Home')} />
+        <TabItem icon="users" label="Circle" onPress={() => handleTabPress('Circle')} />
+        <TabItem icon="clock" label="History" onPress={() => handleTabPress('Routes')} />
+        <TabItem icon="user" label="Profile" active />
+      </View>
+
+      {/* ── Trial offer modal ── */}
       <Modal
-        visible={showExitSheet}
+        visible={modalTrigger !== null}
         transparent
-        animationType="slide"
-        onRequestClose={() => setShowExitSheet(false)}
+        animationType="fade"
+        onRequestClose={hideModal}
       >
         <View style={styles.overlay}>
           <View style={styles.sheet}>
-            <View style={styles.sheetHandle} />
             <View style={styles.sheetIcon}>
-              <Feather name="shield" size={26} color={colors.brand.primary} />
+              <Feather name="gift" size={24} color="#0B5FE8" />
             </View>
-            <Text style={styles.sheetTitle}>Before you go…</Text>
+            <Text style={styles.sheetTitle}>Try Hadin for Free</Text>
             <Text style={styles.sheetSub}>
-              Your circle can't protect you if they can't find you. Try Hadin free — no charge for 3 days.
+              Get 7 days of Elite protection on us. No commitment required.
             </Text>
-            <View style={styles.offerStrip}>
-              <View style={styles.offerBadge}>
-                <Text style={styles.offerBadgeText}>ONE-TIME OFFER</Text>
-              </View>
-              <Text style={styles.offerTitle}>3 Days Free</Text>
-              <Text style={styles.offerSub}>Full access · No charge today · $25/yr after</Text>
-            </View>
-            <View style={styles.sheetBtns}>
-              <Pressable
-                style={({ pressed }) => [styles.acceptBtn, pressed && styles.pressed]}
-                onPress={() => {
-                  setShowExitSheet(false);
-                  navigation.navigate('TrialOffer');
-                }}
-              >
-                <Text style={styles.acceptBtnText}>Try free for 3 days</Text>
-                <Text style={styles.acceptBtnSub}>Card required · Auto-renews at $25/year</Text>
-              </Pressable>
-              <Pressable
-                style={({ pressed }) => [styles.declineBtn, pressed && styles.pressed]}
-                onPress={() => {
-                  setShowExitSheet(false);
-                  BackHandler.exitApp();
-                }}
-              >
-                <Text style={styles.declineBtnText}>No thanks, close app</Text>
-              </Pressable>
-            </View>
+            <Pressable
+              style={({ pressed }) => [styles.acceptBtn, pressed && styles.pressed]}
+              onPress={handleAcceptTrial}
+            >
+              <Text style={styles.acceptBtnText}>Start 7-Day Free Trial</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.declineBtn, pressed && styles.pressed]}
+              onPress={handleDecline}
+            >
+              <Text style={styles.declineBtnText}>
+                {modalTrigger === 'logout' ? 'LOG OUT' : 'No thanks'}
+              </Text>
+            </Pressable>
           </View>
         </View>
       </Modal>
@@ -164,194 +222,299 @@ const SubscriptionScreen = ({ navigation }: Props) => {
   );
 };
 
+// ── Tab item ─────────────────────────────────────────────────────────────────
+
+interface TabItemProps {
+  icon: React.ComponentProps<typeof Feather>['name'];
+  label: string;
+  active?: boolean;
+  onPress?: () => void;
+}
+
+const TabItem = ({ icon, label, active = false, onPress }: TabItemProps) => (
+  <Pressable style={styles.tabItem} onPress={onPress} disabled={active}>
+    <Feather
+      name={icon}
+      size={22}
+      color={active ? '#111827' : '#111827'}
+    />
+    {active && <View style={styles.tabActiveLine} />}
+    <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text>
+  </Pressable>
+);
+
+// ── Styles ────────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.brand.bgSurface },
-  scroll: { flexGrow: 1, paddingBottom: spacing.gap32 },
+  root: { flex: 1, backgroundColor: '#F5F6F8' },
 
-  header: {
-    backgroundColor: colors.brand.primary,
-    paddingHorizontal: spacing.screenPadding,
-    paddingBottom: spacing.gap24,
-  },
-  eyebrow: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: 'rgba(255,255,255,0.45)',
-    letterSpacing: 0.8,
-    marginBottom: 10,
-  },
-  headline: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: colors.white,
-    letterSpacing: -0.5,
-    lineHeight: 32,
-    marginBottom: spacing.gap8,
-  },
-  headerSub: {
-    fontSize: fontSizes.caption,
-    color: 'rgba(255,255,255,0.6)',
-    lineHeight: 20,
-  },
-
-  body: {
-    flex: 1,
-    padding: spacing.screenPadding,
-    gap: spacing.gap12,
-  },
-
-  planCard: {
-    backgroundColor: colors.white,
-    borderRadius: 14,
-    padding: spacing.cardPadding,
-    borderWidth: 0.5,
-    borderColor: '#EEECe6',
-    marginBottom: spacing.gap8,
-  },
-  planTop: {
+  topBar: {
+    height: 50,
+    paddingHorizontal: 10,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 10,
+    backgroundColor: '#F5F6F8',
   },
-  planName: {
-    fontSize: fontSizes.body,
-    fontWeight: '700',
-    color: colors.brand.textPrimary,
-  },
-  priceRow: { flexDirection: 'row', alignItems: 'baseline', gap: 2 },
-  price: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: colors.brand.primary,
-    letterSpacing: -0.5,
-  },
-  pricePer: {
-    fontSize: fontSizes.small,
-    fontWeight: '500',
-    color: colors.brand.textSecondary,
-  },
-  divider: { height: 0.5, backgroundColor: '#F4F3EF', marginBottom: 10 },
-  featRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
-  featIcon: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: colors.brand.light,
+  topIconBtn: {
+    width: 32,
+    height: 32,
     alignItems: 'center',
     justifyContent: 'center',
-    flexShrink: 0,
   },
-  featText: { fontSize: fontSizes.caption, color: colors.brand.textPrimary, flex: 1 },
-
-  subscribeBtn: {
-    backgroundColor: colors.brand.primary,
-    borderRadius: 13,
-    paddingVertical: 15,
+  scroll: {
+    flexGrow: 1,
+    paddingHorizontal: 14,
     alignItems: 'center',
   },
-  subscribeBtnText: { fontSize: fontSizes.body, fontWeight: '700', color: colors.white },
+  contentColumn: {
+    width: '100%',
+    maxWidth: 320,
+    gap: 12,
+  },
 
-  noThanksBtn: {
-    backgroundColor: colors.white,
-    borderRadius: 13,
-    paddingVertical: 14,
+  header: {
     alignItems: 'center',
-    borderWidth: 0.5,
-    borderColor: '#EEECe6',
+    marginTop: 8,
+    marginBottom: 12,
   },
-  noThanksBtnText: { fontSize: fontSizes.body, fontWeight: '500', color: colors.brand.textSecondary },
-
-  pressed: { opacity: 0.8 },
-
-  // Exit intercept
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  sheet: {
-    backgroundColor: colors.white,
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    paddingBottom: 32,
-  },
-  sheetHandle: {
-    width: 30,
-    height: 3,
-    backgroundColor: 'rgba(0,0,0,0.1)',
-    borderRadius: 2,
-    alignSelf: 'center',
-    marginTop: 10,
-  },
-  sheetIcon: {
-    width: 52,
-    height: 52,
-    backgroundColor: colors.brand.light,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-    alignSelf: 'center',
-    marginTop: 16,
-    marginBottom: 10,
-  },
-  sheetTitle: {
-    textAlign: 'center',
-    fontSize: 18,
+  headline: {
+    fontSize: 21,
     fontWeight: '800',
     color: colors.brand.textPrimary,
     marginBottom: 6,
   },
-  sheetSub: {
+  headerSub: {
+    maxWidth: 260,
     textAlign: 'center',
-    fontSize: fontSizes.caption,
-    color: colors.brand.textSecondary,
-    lineHeight: 20,
-    paddingHorizontal: 24,
-    marginBottom: 14,
+    fontSize: 10,
+    color: '#4B5563',
+    lineHeight: 14,
   },
-  offerStrip: {
-    marginHorizontal: 16,
-    marginBottom: 14,
-    backgroundColor: colors.brand.light,
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 0.5,
-    borderColor: '#C6E8D5',
-    alignItems: 'center',
-  },
-  offerBadge: {
-    backgroundColor: colors.brand.primary,
-    borderRadius: 5,
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    marginBottom: 5,
-  },
-  offerBadgeText: { fontSize: 9, fontWeight: '700', color: colors.white, letterSpacing: 0.5 },
-  offerTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: colors.brand.primary,
-    marginBottom: 2,
-  },
-  offerSub: { fontSize: 10, color: '#0F6E56' },
 
-  sheetBtns: { paddingHorizontal: 16, gap: 8 },
-  acceptBtn: {
-    backgroundColor: colors.brand.primary,
-    borderRadius: 12,
-    paddingVertical: 14,
-    alignItems: 'center',
+  // Basic card
+  basicCard: {
+    backgroundColor: colors.white,
+    borderRadius: 8,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: '#D7DAE0',
   },
-  acceptBtnText: { fontSize: fontSizes.body, fontWeight: '700', color: colors.white },
-  acceptBtnSub: { fontSize: 10, color: 'rgba(255,255,255,0.6)', marginTop: 2 },
-  declineBtn: {
-    backgroundColor: '#F4F3EF',
-    borderRadius: 12,
+  planLabel: {
+    fontSize: 8,
+    fontWeight: '700',
+    color: '#8A8F98',
+    letterSpacing: 0,
+    marginBottom: 7,
+  },
+  planTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  planTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: colors.brand.textPrimary,
+    flex: 1,
+  },
+  priceRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 4,
+    marginBottom: 14,
+  },
+  price: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: '#111827',
+  },
+  pricePer: { fontSize: 11, color: '#4B5563', fontWeight: '600' },
+  divider: { height: 0 },
+  featRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
+  featTextDark: { fontSize: 10, color: '#111827', flex: 1 },
+  basicBtn: {
+    marginTop: 14,
+    backgroundColor: '#E5E7EB',
+    borderRadius: 5,
     paddingVertical: 12,
     alignItems: 'center',
   },
-  declineBtnText: { fontSize: fontSizes.body, fontWeight: '500', color: colors.brand.textSecondary },
+  basicBtnText: { fontSize: 10, fontWeight: '800', color: '#111827' },
+
+  // Elite card
+  eliteCard: {
+    backgroundColor: '#0B1026',
+    borderRadius: 8,
+    padding: 18,
+    shadowColor: '#000',
+    shadowOpacity: 0.28,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
+  },
+  eliteTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  elitePlanLabel: {
+    fontSize: 8,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.72)',
+    letterSpacing: 0,
+  },
+  recommendedBadge: {
+    backgroundColor: '#5B21B6',
+    borderRadius: 0,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  recommendedText: { fontSize: 7, fontWeight: '800', color: '#fff', letterSpacing: 0 },
+  eliteTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  eliteTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#fff',
+    flex: 1,
+    lineHeight: 22,
+  },
+  elitePriceRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 4,
+    marginBottom: 18,
+  },
+  elitePrice: { fontSize: 28, fontWeight: '800', color: '#fff' },
+  elitePricePer: { fontSize: 11, color: 'rgba(255,255,255,0.68)', fontWeight: '600' },
+  eliteEverything: {
+    fontSize: 10,
+    color: '#fff',
+    marginBottom: 4,
+    fontWeight: '700',
+  },
+  featTextLight: { fontSize: 10, color: 'rgba(255,255,255,0.88)', flex: 1 },
+  eliteBtn: {
+    marginTop: 16,
+    backgroundColor: '#5B21D9',
+    borderRadius: 5,
+    paddingVertical: 13,
+    alignItems: 'center',
+  },
+  eliteBtnText: { fontSize: 10, fontWeight: '800', color: '#fff' },
+
+  // Log out link
+  logoutLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    alignSelf: 'center',
+    minWidth: 112,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    marginTop: 18,
+    borderWidth: 2,
+    borderColor: '#DC2626',
+    borderRadius: 5,
+  },
+  logoutLinkText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#DC2626',
+    letterSpacing: 0,
+  },
+
+  pressed: { opacity: 0.8 },
+
+  // Tab bar
+  tabBar: {
+    flexDirection: 'row',
+    backgroundColor: colors.white,
+    borderTopWidth: 1,
+    borderTopColor: '#E5E7EB',
+    paddingTop: 7,
+  },
+  tabItem: { flex: 1, alignItems: 'center', gap: 2 },
+  tabActiveLine: {
+    width: 0,
+    height: 0,
+  },
+  tabLabel: { fontSize: 9, color: '#111827' },
+  tabLabelActive: { color: '#111827', fontWeight: '800' },
+
+  // Trial offer modal
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  sheet: {
+    backgroundColor: colors.white,
+    borderRadius: 8,
+    paddingHorizontal: 36,
+    paddingTop: 34,
+    paddingBottom: 30,
+    alignItems: 'center',
+    width: '100%',
+    maxWidth: 340,
+  },
+  sheetIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#E4E8FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 22,
+  },
+  sheetTitle: {
+    textAlign: 'center',
+    fontSize: 21,
+    fontWeight: '800',
+    color: colors.brand.textPrimary,
+    marginBottom: 8,
+  },
+  sheetSub: {
+    textAlign: 'center',
+    fontSize: 12,
+    color: '#4B5563',
+    lineHeight: 16,
+    marginBottom: 28,
+  },
+  acceptBtn: {
+    width: '100%',
+    backgroundColor: '#075FE4',
+    borderRadius: 7,
+    paddingVertical: 15,
+    alignItems: 'center',
+    marginBottom: 16,
+    shadowColor: '#075FE4',
+    shadowOpacity: 0.28,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 4,
+  },
+  acceptBtnText: { fontSize: 12, fontWeight: '800', color: colors.white },
+  declineBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+  },
+  declineBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#374151',
+  },
 });
 
 export default SubscriptionScreen;

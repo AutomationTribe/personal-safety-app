@@ -24,11 +24,11 @@ export type AuthStackParamList = {
 
 export type AppStackParamList = {
   Home: undefined;
-  Circle: undefined;
+  Circle: { openAddModal?: boolean } | undefined;
   Routes: undefined;
   TripDetail: { tripId: string };
   Subscription: undefined;
-  DirectPayment: undefined;
+  DirectPayment: { plan: 'basic' | 'elite' };
   TrialOffer: undefined;
   Success: { type: 'subscriber' | 'trial' };
   Settings: undefined;

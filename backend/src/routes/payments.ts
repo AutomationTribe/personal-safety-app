@@ -8,8 +8,11 @@ const router = Router();
 
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY ?? '';
 
-// ₦25,000 in kobo.
-const SUBSCRIPTION_AMOUNT_KOBO = 2_500_000;
+// Plan amounts in kobo (₦1 = 100 kobo)
+const PLAN_AMOUNTS: Record<string, number> = {
+  basic: 2_000_000,  // ₦20,000
+  elite: 3_500_000,  // ₦35,000
+};
 const SUBSCRIPTION_CURRENCY = 'NGN';
 
 // Placeholder URL we intercept in the WebView to detect payment completion.
@@ -50,9 +53,18 @@ async function requireAuth(req: Request, res: Response, next: () => void): Promi
 // Initializes a Paystack transaction and returns the checkout URL.
 // The mobile app opens this URL in a WebView.
 
+const InitSchema = z.object({
+  plan: z.enum(['basic', 'elite']).default('elite'),
+});
+
 router.post('/init', requireAuth as unknown as Parameters<typeof router.post>[1], async (req: Request, res: Response) => {
   try {
     const user = (req as AuthedRequest).user;
+    const parsed = InitSchema.safeParse(req.body);
+    const plan = parsed.success ? parsed.data.plan : 'elite';
+    const amount = PLAN_AMOUNTS[plan] ?? PLAN_AMOUNTS.elite;
+
+    const planLabel = plan === 'basic' ? 'Essential Safety — Yearly' : 'Complete Peace of Mind — Yearly';
 
     const response = await fetch('https://api.paystack.co/transaction/initialize', {
       method: 'POST',
@@ -62,17 +74,17 @@ router.post('/init', requireAuth as unknown as Parameters<typeof router.post>[1]
       },
       body: JSON.stringify({
         email: user.email,
-        amount: SUBSCRIPTION_AMOUNT_KOBO,
+        amount,
         currency: SUBSCRIPTION_CURRENCY,
         callback_url: CALLBACK_URL,
         metadata: {
           user_id: user.id,
-          plan: 'hadin_pro_yearly',
+          plan,
           custom_fields: [
             {
               display_name: 'Plan',
               variable_name: 'plan',
-              value: 'Hadin Pro — Yearly',
+              value: planLabel,
             },
           ],
         },
@@ -127,7 +139,7 @@ router.post('/verify', requireAuth as unknown as Parameters<typeof router.post>[
     const data = await response.json() as {
       status: boolean;
       message: string;
-      data: { status: string; amount: number; currency: string };
+      data: { status: string; amount: number; currency: string; metadata?: { plan?: string } };
     };
 
     if (!data.status || data.data.status !== 'success') {
@@ -136,10 +148,16 @@ router.post('/verify', requireAuth as unknown as Parameters<typeof router.post>[
       return;
     }
 
+    const plan = data.data.metadata?.plan ?? 'elite';
+    const nextBillingDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+
     // Activate subscription in Supabase
     const { error: dbError } = await supabaseAdmin
       .from('profiles')
-      .upsert({ id: user.id, subscription_status: 'active' }, { onConflict: 'id' });
+      .upsert(
+        { id: user.id, subscription_status: 'active', plan, next_billing_date: nextBillingDate },
+        { onConflict: 'id' },
+      );
 
     if (dbError) {
       console.error('[payments] profile update error:', dbError);
@@ -152,6 +170,43 @@ router.post('/verify', requireAuth as unknown as Parameters<typeof router.post>[
   } catch (err) {
     console.error('[payments] /verify error:', err);
     res.status(500).json({ error: 'Verification request failed' });
+  }
+});
+
+// ── POST /api/v1/payments/trial/start ────────────────────────────────────────
+// Activates an 8-day free trial. No card required.
+
+router.post('/trial/start', requireAuth as unknown as Parameters<typeof router.post>[1], async (req: Request, res: Response) => {
+  try {
+    const user = (req as AuthedRequest).user;
+
+    const now = new Date();
+    const trialEnd = new Date(now.getTime() + 8 * 24 * 60 * 60 * 1000);
+
+    const { error: dbError } = await supabaseAdmin
+      .from('profiles')
+      .upsert(
+        {
+          id: user.id,
+          subscription_status: 'trial',
+          plan: 'elite',
+          trial_start: now.toISOString(),
+          trial_end: trialEnd.toISOString(),
+        },
+        { onConflict: 'id' },
+      );
+
+    if (dbError) {
+      console.error('[trial] profile update error:', dbError);
+      res.status(500).json({ error: 'Could not start trial' });
+      return;
+    }
+
+    console.log(`[trial] 8-day trial started for user ${user.id}, ends ${trialEnd.toISOString()}`);
+    res.json({ success: true, trial_end: trialEnd.toISOString() });
+  } catch (err) {
+    console.error('[payments] /trial/start error:', err);
+    res.status(500).json({ error: 'Could not start trial' });
   }
 });
 
@@ -189,14 +244,19 @@ router.post('/webhook', async (req: Request, res: Response) => {
 
     if (event.event === 'charge.success') {
       const userId = event.data.metadata?.user_id;
+      const plan = (event.data.metadata as Record<string, string> | undefined)?.plan ?? 'elite';
       if (userId) {
+        const nextBillingDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
         const { error: whErr } = await supabaseAdmin
           .from('profiles')
-          .upsert({ id: userId, subscription_status: 'active' }, { onConflict: 'id' });
+          .upsert(
+            { id: userId, subscription_status: 'active', plan, next_billing_date: nextBillingDate },
+            { onConflict: 'id' },
+          );
         if (whErr) {
           console.error('[webhook] profile update error:', whErr);
         } else {
-          console.log(`[webhook] subscription activated via webhook for user ${userId}`);
+          console.log(`[webhook] subscription activated via webhook for user ${userId} plan=${plan}`);
         }
       }
     }

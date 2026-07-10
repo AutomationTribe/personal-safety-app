@@ -5,7 +5,6 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
@@ -19,59 +18,58 @@ type Props = {
   navigation: NativeStackNavigationProp<AppStackParamList, 'TrialOffer'>;
 };
 
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
+
 const TIMELINE = [
   { day: 'Today — Day 1', desc: 'Full access, no charge', filled: true },
-  { day: 'Day 3 — Reminder', desc: 'We\'ll remind you before trial ends', filled: false },
-  { day: 'Day 4 — $25 charged', desc: 'Renews yearly unless cancelled', filled: false },
+  { day: 'Day 6 — Reminder', desc: "We'll remind you before the trial ends", filled: false },
+  { day: 'Day 9 — ₦35,000 charged', desc: 'Renews yearly unless cancelled', filled: false },
 ];
 
 const TrialOfferScreen = ({ navigation }: Props) => {
   const insets = useSafeAreaInsets();
-
-  const [cardNumber, setCardNumber] = useState('');
-  const [expiry, setExpiry] = useState('');
-  const [cvv, setCvv] = useState('');
   const [loading, setLoading] = useState(false);
-
-  const formatCardNumber = (val: string) => {
-    const digits = val.replace(/\D/g, '').slice(0, 16);
-    return digits.replace(/(.{4})/g, '$1 ').trim();
-  };
-
-  const formatExpiry = (val: string) => {
-    const digits = val.replace(/\D/g, '').slice(0, 4);
-    if (digits.length >= 3) return `${digits.slice(0, 2)} / ${digits.slice(2)}`;
-    return digits;
-  };
+  const [serverError, setServerError] = useState('');
 
   const handleStartTrial = async () => {
     setLoading(true);
+    setServerError('');
 
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        setServerError('Session expired. Please sign in again.');
+        setLoading(false);
+        return;
+      }
 
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      const trialStart = new Date().toISOString();
-      const trialEnd = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
-      await supabase
-        .from('profiles')
-        .upsert({
-          id: user.id,
-          subscription_status: 'trial',
-          trial_start: trialStart,
-          trial_end: trialEnd,
-        }, { onConflict: 'id' });
+      const res = await fetch(`${BACKEND_URL}/api/v1/payments/trial/start`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const data = await res.json() as { success?: boolean; error?: string };
+
+      if (!res.ok || !data.success) {
+        setServerError(data.error ?? 'Could not start trial. Please try again.');
+        setLoading(false);
+        return;
+      }
+
+      navigation.navigate('Success', { type: 'trial' });
+    } catch {
+      setServerError('Could not start trial. Please try again.');
+      setLoading(false);
     }
-
-    setLoading(false);
-    navigation.navigate('Success', { type: 'trial' });
   };
 
   return (
     <View style={styles.root}>
       <ScrollView
         contentContainerStyle={styles.scroll}
-        keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
         {/* ── Green header ── */}
@@ -84,14 +82,22 @@ const TrialOfferScreen = ({ navigation }: Props) => {
             <View style={styles.badgeDot} />
             <Text style={styles.badgeText}>One-time offer</Text>
           </View>
-          <Text style={styles.headline}>Try Hadin free{'\n'}for 3 days.</Text>
+          <Text style={styles.headline}>Try Hadin free{'\n'}for 8 days.</Text>
           <Text style={styles.headerSub}>
-            No charge until day 4. Cancel before then and pay nothing.
+            No charge for 8 days. Start protecting yourself today.
           </Text>
         </View>
 
         {/* ── Body ── */}
         <View style={styles.body}>
+          {/* Error banner */}
+          {serverError ? (
+            <View style={styles.errorBanner}>
+              <Feather name="alert-circle" size={14} color={colors.brand.sos} />
+              <Text style={styles.errorBannerText}>{serverError}</Text>
+            </View>
+          ) : null}
+
           {/* Timeline */}
           <View style={styles.card}>
             {TIMELINE.map((item, i) => (
@@ -108,64 +114,32 @@ const TrialOfferScreen = ({ navigation }: Props) => {
             ))}
           </View>
 
-          {/* Card form */}
+          {/* What you get */}
           <View style={styles.card}>
-            <Text style={styles.fieldLabel}>Card number</Text>
-            <View style={styles.fieldInput}>
-              <TextInput
-                style={styles.textInput}
-                value={cardNumber}
-                onChangeText={(v) => setCardNumber(formatCardNumber(v))}
-                placeholder="•••• •••• •••• ••••"
-                placeholderTextColor="#C5C3BB"
-                keyboardType="number-pad"
-                returnKeyType="next"
-                editable={!loading}
-              />
-            </View>
-            <View style={styles.fieldRow}>
-              <View style={styles.fieldHalf}>
-                <Text style={styles.fieldLabel}>Expiry</Text>
-                <View style={styles.fieldInput}>
-                  <TextInput
-                    style={styles.textInput}
-                    value={expiry}
-                    onChangeText={(v) => setExpiry(formatExpiry(v))}
-                    placeholder="MM / YY"
-                    placeholderTextColor="#C5C3BB"
-                    keyboardType="number-pad"
-                    returnKeyType="next"
-                    editable={!loading}
-                  />
-                </View>
+            <Text style={styles.cardTitle}>Full access includes</Text>
+            {[
+              'SOS Trigger with circle alerts',
+              'Live location sharing',
+              '24/7 AI monitoring',
+              'Family circle up to 5 contacts',
+              'Priority emergency response',
+            ].map((feat) => (
+              <View key={feat} style={styles.featRow}>
+                <Feather name="check" size={14} color={colors.brand.primary} />
+                <Text style={styles.featText}>{feat}</Text>
               </View>
-              <View style={styles.fieldHalf}>
-                <Text style={styles.fieldLabel}>CVV</Text>
-                <View style={styles.fieldInput}>
-                  <TextInput
-                    style={styles.textInput}
-                    value={cvv}
-                    onChangeText={(v) => setCvv(v.replace(/\D/g, '').slice(0, 4))}
-                    placeholder="•••"
-                    placeholderTextColor="#C5C3BB"
-                    keyboardType="number-pad"
-                    secureTextEntry
-                    editable={!loading}
-                  />
-                </View>
-              </View>
-            </View>
+            ))}
           </View>
 
-          {/* Security */}
+          {/* Security note */}
           <View style={styles.secureRow}>
             <Feather name="lock" size={13} color={colors.brand.textSecondary} />
-            <Text style={styles.secureText}>Secured by Paystack</Text>
+            <Text style={styles.secureText}>No card required · Cancel anytime</Text>
           </View>
 
           {/* Trial button */}
           <Pressable
-            style={({ pressed }) => [styles.trialBtn, pressed && !loading && styles.pressed]}
+            style={({ pressed }) => [styles.trialBtn, loading && styles.trialBtnDisabled, pressed && !loading && styles.pressed]}
             onPress={handleStartTrial}
             disabled={loading}
           >
@@ -174,13 +148,14 @@ const TrialOfferScreen = ({ navigation }: Props) => {
             ) : (
               <>
                 <Text style={styles.trialBtnText}>Start free trial</Text>
-                <Text style={styles.trialBtnSub}>No charge today · $25/yr from day 4</Text>
+                <Text style={styles.trialBtnSub}>No charge for 8 days · ₦35,000/yr from day 9</Text>
               </>
             )}
           </Pressable>
 
           <Text style={styles.legal}>
-            Cancel before day 4 to pay nothing. By continuing you agree to Hadin's{' '}
+            Full access for 8 days, no payment required. After 8 days you'll be prompted to subscribe.
+            By continuing you agree to Hadin's{' '}
             <Text style={styles.legalLink}>Terms</Text>.
           </Text>
         </View>
@@ -229,12 +204,30 @@ const styles = StyleSheet.create({
 
   body: { padding: spacing.screenPadding, gap: spacing.gap12 },
 
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: 8,
+    padding: 12,
+  },
+  errorBannerText: { flex: 1, color: colors.brand.sos, fontSize: fontSizes.caption, lineHeight: 18 },
+
   card: {
     backgroundColor: colors.white,
     borderRadius: 14,
     padding: spacing.cardPadding,
     borderWidth: 0.5,
     borderColor: '#EEECe6',
+  },
+  cardTitle: {
+    fontSize: fontSizes.caption,
+    fontWeight: '700',
+    color: colors.brand.textPrimary,
+    marginBottom: 10,
   },
 
   timelineRow: { flexDirection: 'row', gap: 10, paddingBottom: 6 },
@@ -253,26 +246,8 @@ const styles = StyleSheet.create({
   timelineDay: { fontSize: fontSizes.caption, fontWeight: '700', color: colors.brand.primary },
   timelineDesc: { fontSize: 10, color: colors.brand.textSecondary, marginTop: 2 },
 
-  fieldLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: colors.brand.textSecondary,
-    letterSpacing: 0.7,
-    textTransform: 'uppercase',
-    marginBottom: 5,
-  },
-  fieldInput: {
-    backgroundColor: '#F4F3EF',
-    borderRadius: 9,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderWidth: 0.5,
-    borderColor: '#EEECe6',
-    marginBottom: 10,
-  },
-  textInput: { fontSize: fontSizes.caption, color: colors.brand.textPrimary },
-  fieldRow: { flexDirection: 'row', gap: 8 },
-  fieldHalf: { flex: 1 },
+  featRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 3 },
+  featText: { fontSize: fontSizes.caption, color: colors.brand.textPrimary, flex: 1 },
 
   secureRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   secureText: { fontSize: 10, color: colors.brand.textSecondary },
@@ -283,6 +258,7 @@ const styles = StyleSheet.create({
     paddingVertical: 15,
     alignItems: 'center',
   },
+  trialBtnDisabled: { opacity: 0.6 },
   trialBtnText: { fontSize: fontSizes.body, fontWeight: '700', color: colors.white },
   trialBtnSub: { fontSize: 10, color: 'rgba(255,255,255,0.6)', marginTop: 3 },
   pressed: { opacity: 0.8 },

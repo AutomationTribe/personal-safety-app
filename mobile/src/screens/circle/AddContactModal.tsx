@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   KeyboardAvoidingView,
   Modal,
   Pressable,
@@ -18,12 +19,9 @@ import {
 } from '../../services/CircleService';
 import { colors, fontSizes, spacing } from '../../styles/tokens';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const RELATIONSHIPS = ['Sister', 'Brother', 'Mother', 'Father', 'Friend', 'Partner', 'Other'] as const;
-type Relationship = typeof RELATIONSHIPS[number];
-
 const NIGERIAN_E164_RE = /^\+234[789]\d{9}$/;
+const RELATIONSHIPS = ['Family Member', 'Wife', 'Husband', 'Son', 'Daughter', 'Sister', 'Brother', 'Mother', 'Father', 'Friend', 'Partner', 'Other'] as const;
+type Relationship = typeof RELATIONSHIPS[number];
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
@@ -45,6 +43,9 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
   const nameRef = useRef<TextInput>(null);
   const phoneRef = useRef<TextInput>(null);
   const emailRef = useRef<TextInput>(null);
+  const sheetY = useRef(new Animated.Value(420)).current;
+  const sheetOpacity = useRef(new Animated.Value(0)).current;
+  const saveScale = useRef(new Animated.Value(1)).current;
 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -65,9 +66,26 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
       setErrors({});
       setSaveError('');
       setSaving(false);
+      sheetY.setValue(420);
+      sheetOpacity.setValue(0);
+      Animated.parallel([
+        Animated.spring(sheetY, {
+          toValue: 0,
+          useNativeDriver: true,
+          stiffness: 150,
+          damping: 22,
+          mass: 0.9,
+          overshootClamping: false,
+        }),
+        Animated.timing(sheetOpacity, {
+          toValue: 1,
+          duration: 180,
+          useNativeDriver: true,
+        }),
+      ]).start();
       setTimeout(() => nameRef.current?.focus(), 200);
     }
-  }, [visible]);
+  }, [visible, sheetOpacity, sheetY]);
 
   // ── Validation ────────────────────────────────────────────────────────────
 
@@ -115,6 +133,15 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
     onClose();
   };
 
+  const animateSave = (toValue: number) => {
+    Animated.spring(saveScale, {
+      toValue,
+      useNativeDriver: true,
+      speed: 30,
+      bounciness: 6,
+    }).start();
+  };
+
   // ── Derived UI state ──────────────────────────────────────────────────────
 
   const phoneFormatted = formatNigerianPhone(phone);
@@ -128,45 +155,40 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
     <Modal
       visible={visible}
       transparent
-      animationType="slide"
+      animationType="none"
       onRequestClose={onClose}
       statusBarTranslucent
     >
-      <KeyboardAvoidingView
-        style={styles.overlay}
-        behavior="padding"
-      >
+      <KeyboardAvoidingView style={styles.overlay} behavior="padding">
         <Pressable style={styles.dismissArea} onPress={onClose} />
-          <View style={styles.sheet}>
-            {/* Handle */}
-            <View style={styles.handleRow}>
-              <View style={styles.handle} />
-            </View>
+        <Animated.View style={[styles.sheet, { opacity: sheetOpacity, transform: [{ translateY: sheetY }] }]}>
+          <View style={styles.handleRow}>
+            <View style={styles.handle} />
+          </View>
 
-            {/* Header */}
-            <View style={styles.headerRow}>
-              <Text style={styles.headerTitle}>Add to your circle</Text>
-              <Pressable
-                style={({ pressed }) => [styles.closeBtn, pressed && styles.closeBtnPressed]}
-                onPress={onClose}
-                hitSlop={8}
-              >
-                <Feather name="x" size={16} color={colors.brand.textSecondary} />
-              </Pressable>
-            </View>
-
-            <View style={styles.divider} />
-
-            <ScrollView
-              style={styles.scroll}
-              contentContainerStyle={styles.scrollContent}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
+          <View style={styles.headerRow}>
+            <Text style={styles.headerTitle}>Add to your circle</Text>
+            <Pressable
+              style={({ pressed }) => [styles.closeBtn, pressed && styles.closeBtnPressed]}
+              onPress={onClose}
+              hitSlop={8}
             >
+              <Feather name="x" size={16} color="#4B5563" />
+            </Pressable>
+          </View>
+
+          <View style={styles.divider} />
+
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
               {/* ── Name ── */}
               <View style={styles.fieldGroup}>
                 <Text style={styles.label}>
-                  Name <Text style={styles.required}>*</Text>
+                  Full Name <Text style={styles.required}>*</Text>
                 </Text>
                 <View
                   style={[
@@ -182,8 +204,8 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
                     onChangeText={(t) => { setName(t); setErrors((e) => ({ ...e, name: undefined })); }}
                     onFocus={() => setFocusedField('name')}
                     onBlur={() => setFocusedField(null)}
-                    placeholder="Full name"
-                    placeholderTextColor="#C5C3BB"
+                    placeholder="e.g. John Doe"
+                    placeholderTextColor="#8E95A3"
                     autoCapitalize="words"
                     returnKeyType="next"
                     onSubmitEditing={() => phoneRef.current?.focus()}
@@ -196,7 +218,7 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
               {/* ── Phone ── */}
               <View style={styles.fieldGroup}>
                 <Text style={styles.label}>
-                  Phone <Text style={styles.required}>*</Text>
+                  Phone Number <Text style={styles.required}>*</Text>
                 </Text>
                 <View
                   style={[
@@ -215,11 +237,11 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
                     }}
                     onBlur={() => {
                       setFocusedField(null);
-                      if (phone.trim()) setPhone(phoneFormatted);
-                    }}
+                    if (phone.trim()) setPhone(phoneFormatted);
+                  }}
                     onFocus={() => setFocusedField('phone')}
-                    placeholder="08012345678 or +234…"
-                    placeholderTextColor="#C5C3BB"
+                    placeholder="+1(555) 000-0000"
+                    placeholderTextColor="#8E95A3"
                     keyboardType="phone-pad"
                     returnKeyType="next"
                     onSubmitEditing={() => emailRef.current?.focus()}
@@ -227,7 +249,7 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
                   />
                   {phoneValid && (
                     <View style={styles.validIcon}>
-                      <Feather name="check-circle" size={16} color={colors.brand.mid} />
+                      <Feather name="check-circle" size={16} color="#8491FF" />
                     </View>
                   )}
                 </View>
@@ -238,7 +260,7 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
               <View style={styles.fieldGroup}>
                 <Text style={styles.label}>
                   Email{' '}
-                  <Text style={styles.optionalLabel}>(optional)</Text>
+                  <Text style={styles.optionalLabel}>(Optional)</Text>
                 </Text>
                 <View
                   style={[
@@ -253,8 +275,8 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
                     onChangeText={setEmail}
                     onFocus={() => setFocusedField('email')}
                     onBlur={() => setFocusedField(null)}
-                    placeholder="their@email.com"
-                    placeholderTextColor="#C5C3BB"
+                    placeholder="john@example.com"
+                    placeholderTextColor="#8E95A3"
                     keyboardType="email-address"
                     autoCapitalize="none"
                     autoCorrect={false}
@@ -264,7 +286,6 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
                 </View>
               </View>
 
-              {/* ── Relationship chips ── */}
               <View style={styles.fieldGroup}>
                 <Text style={styles.label}>
                   Relationship <Text style={styles.required}>*</Text>
@@ -298,9 +319,8 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
                 ) : null}
               </View>
 
-              {/* ── SMS note ── */}
               <View style={styles.smsNote}>
-                <Feather name="message-circle" size={15} color={colors.brand.primary} style={styles.smsIcon} />
+                <Feather name="message-circle" size={15} color="#6B008F" style={styles.smsIcon} />
                 <Text style={styles.smsText}>{smsNote}</Text>
               </View>
 
@@ -308,23 +328,27 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
               {saveError ? <Text style={styles.saveError}>{saveError}</Text> : null}
 
               {/* ── Save button ── */}
-              <Pressable
-                style={({ pressed }) => [
-                  styles.saveBtn,
-                  saving && styles.saveBtnDisabled,
-                  pressed && !saving && styles.saveBtnPressed,
-                ]}
-                onPress={handleSave}
-                disabled={saving}
-              >
-                {saving ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.saveBtnText}>Save contact</Text>
-                )}
-              </Pressable>
-            </ScrollView>
-          </View>
+              <Animated.View style={{ transform: [{ scale: saveScale }] }}>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.saveBtn,
+                    saving && styles.saveBtnDisabled,
+                    pressed && !saving && styles.saveBtnPressed,
+                  ]}
+                  onPress={handleSave}
+                  onPressIn={() => animateSave(0.97)}
+                  onPressOut={() => animateSave(1)}
+                  disabled={saving}
+                >
+                  {saving ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.saveBtnText}>Add to Circle</Text>
+                  )}
+                </Pressable>
+              </Animated.View>
+          </ScrollView>
+        </Animated.View>
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -335,7 +359,7 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: 'rgba(17,24,39,0.45)',
     justifyContent: 'flex-end',
   },
   dismissArea: {
@@ -358,7 +382,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 3,
     borderRadius: 2,
-    backgroundColor: 'rgba(0,0,0,0.1)',
+    backgroundColor: '#D7D9E8',
   },
 
   // Header
@@ -373,21 +397,21 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 17,
     fontWeight: '800',
-    color: colors.brand.textPrimary,
+    color: '#111827',
     letterSpacing: -0.2,
   },
   closeBtn: {
     width: 30,
     height: 30,
     borderRadius: 8,
-    backgroundColor: colors.brand.bgSurface,
+    backgroundColor: '#F1F3FD',
     justifyContent: 'center',
     alignItems: 'center',
   },
   closeBtnPressed: { opacity: 0.65 },
   divider: {
     height: 0.5,
-    backgroundColor: 'rgba(0,0,0,0.08)',
+    backgroundColor: '#EEF0F5',
   },
 
   // Scroll body
@@ -400,32 +424,31 @@ const styles = StyleSheet.create({
   },
 
   // Fields
-  fieldGroup: { gap: 6 },
+  fieldGroup: { gap: 7 },
   label: {
-    fontSize: fontSizes.caption,
-    fontWeight: '600',
-    color: colors.brand.textSecondary,
-    letterSpacing: 0.2,
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#374151',
   },
-  required: { color: colors.brand.primary },
+  required: { color: '#6B008F' },
   optionalLabel: {
     fontSize: 11,
-    fontWeight: '400',
-    color: '#B0AFA8',
+    color: '#9CA3AF',
+    fontWeight: '500',
   },
   inputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: spacing.inputHeight,
-    borderWidth: 0.5,
-    borderColor: 'rgba(0,0,0,0.12)',
-    borderRadius: spacing.inputRadius,
-    paddingHorizontal: spacing.gap16,
-    backgroundColor: colors.white,
+    height: 45,
+    borderWidth: 1,
+    borderColor: '#D7D8E8',
+    borderRadius: 6,
+    paddingHorizontal: 15,
+    backgroundColor: '#F4F5FB',
   },
   inputFocused: {
-    borderColor: colors.brand.mid,
-    borderWidth: 1.5,
+    borderColor: '#6B008F',
+    backgroundColor: '#FFFFFF',
   },
   inputErrorBorder: {
     borderColor: colors.danger,
@@ -433,8 +456,8 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    color: colors.brand.textPrimary,
-    fontSize: fontSizes.body,
+    color: '#111827',
+    fontSize: 14,
     height: '100%',
   },
   validIcon: { marginLeft: spacing.gap8 },
@@ -454,16 +477,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.gap12,
     paddingVertical: 8,
     borderRadius: 20,
-    backgroundColor: colors.brand.bgSurface,
+    backgroundColor: '#F1F3FD',
+    borderWidth: 1,
+    borderColor: '#D7D9E8',
   },
   chipActive: {
-    backgroundColor: colors.brand.primary,
+    backgroundColor: '#6B008F',
+    borderColor: '#6B008F',
   },
   chipPressed: { opacity: 0.7 },
   chipText: {
     fontSize: fontSizes.caption,
-    fontWeight: '600',
-    color: colors.brand.textSecondary,
+    fontWeight: '700',
+    color: '#4B5563',
   },
   chipTextActive: {
     color: colors.white,
@@ -472,10 +498,10 @@ const styles = StyleSheet.create({
   // SMS note
   smsNote: {
     flexDirection: 'row',
-    backgroundColor: colors.brand.light,
+    backgroundColor: '#F1E7FF',
     borderRadius: 10,
     borderWidth: 0.5,
-    borderColor: '#C6E8D5',
+    borderColor: '#D8B4FE',
     padding: spacing.gap12,
     gap: spacing.gap8,
   },
@@ -483,7 +509,7 @@ const styles = StyleSheet.create({
   smsText: {
     flex: 1,
     fontSize: fontSizes.caption,
-    color: colors.brand.primary,
+    color: '#6B008F',
     lineHeight: 19,
   },
 
@@ -496,16 +522,21 @@ const styles = StyleSheet.create({
   saveBtn: {
     height: spacing.buttonHeight,
     borderRadius: 13,
-    backgroundColor: colors.brand.primary,
+    backgroundColor: '#6B008F',
     justifyContent: 'center',
     alignItems: 'center',
+    shadowColor: '#4C1D95',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.24,
+    shadowRadius: 8,
+    elevation: 5,
   },
   saveBtnDisabled: { opacity: 0.5 },
   saveBtnPressed: { opacity: 0.85 },
   saveBtnText: {
     color: colors.white,
     fontSize: fontSizes.button,
-    fontWeight: '700',
+    fontWeight: '800',
   },
 });
 

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
+  ImageBackground,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -182,18 +183,23 @@ const LoginScreen = ({ navigation }: Props) => {
   const resetCanSubmit = resetEmailIsValid && !resetLoading;
 
   return (
-    <KeyboardAvoidingView
+    <ImageBackground
+      source={require('../../../assets/login-gradient-bg.png')}
       style={styles.root}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      resizeMode="cover"
     >
-      <ScrollView
-        contentContainerStyle={[
-          styles.scroll,
-          { paddingTop: insets.top + 32, paddingBottom: insets.bottom + 32 },
-        ]}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
+      <KeyboardAvoidingView
+        style={styles.keyboardRoot}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
+        <ScrollView
+          contentContainerStyle={[
+            styles.scroll,
+            { paddingTop: insets.top + 32, paddingBottom: insets.bottom + 32 },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
         <View style={styles.hero}>
           <Image
             source={require('../../../assets/hadin-login-logo.png')}
@@ -323,16 +329,16 @@ const LoginScreen = ({ navigation }: Props) => {
             <Text style={styles.footerLink}> Sign Up</Text>
           </Pressable>
         </View>
-      </ScrollView>
+        </ScrollView>
 
-      {/* ── Password Reset Sheet ── */}
-      <Modal
-        visible={showResetSheet}
-        transparent
-        animationType="slide"
-        onRequestClose={handleCloseResetSheet}
-        statusBarTranslucent
-      >
+        {/* ── Password Reset Sheet ── */}
+        <Modal
+          visible={showResetSheet}
+          transparent
+          animationType="slide"
+          onRequestClose={handleCloseResetSheet}
+          statusBarTranslucent
+        >
         <View style={rs.overlay}>
           <Pressable style={StyleSheet.absoluteFillObject} onPress={handleCloseResetSheet} />
 
@@ -468,8 +474,9 @@ const LoginScreen = ({ navigation }: Props) => {
             </View>
           </KeyboardAvoidingView>
         </View>
-      </Modal>
-    </KeyboardAvoidingView>
+        </Modal>
+      </KeyboardAvoidingView>
+    </ImageBackground>
   );
 };
 
@@ -478,6 +485,9 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: '#F8FAFC',
+  },
+  keyboardRoot: {
+    flex: 1,
   },
   scroll: {
     flexGrow: 1,

@@ -1,11 +1,11 @@
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { CommonActions, RouteProp } from '@react-navigation/native';
 import { colors, fontSizes, spacing } from '../../styles/tokens';
 import { AppStackParamList } from '../../navigation/AppNavigator';
+import HadinLogo from '../../components/HadinLogo';
 
 type Props = {
   navigation: NativeStackNavigationProp<AppStackParamList, 'Success'>;
@@ -27,7 +27,7 @@ const SuccessScreen = ({ navigation, route }: Props) => {
     <View style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       <View style={styles.content}>
         <View style={styles.iconCircle}>
-          <Feather name="shield" size={30} color={colors.white} />
+          <HadinLogo size={54} />
         </View>
 
         <Text style={styles.title}>You're protected.</Text>
@@ -38,7 +38,7 @@ const SuccessScreen = ({ navigation, route }: Props) => {
         <View style={styles.badge}>
           <View style={styles.badgeDot} />
           <Text style={styles.badgeText}>
-            {isTrial ? 'Free trial · 3 days remaining' : 'Hadin Pro · Active'}
+            {isTrial ? 'Free trial · 8 days remaining' : 'Hadin Pro · Active'}
           </Text>
         </View>
 
@@ -51,8 +51,8 @@ const SuccessScreen = ({ navigation, route }: Props) => {
 
         <Text style={styles.note}>
           {isTrial
-            ? 'Card charged $25 on day 4 unless cancelled'
-            : 'Billed $25/year · Cancel anytime from settings'}
+            ? 'Full access for 8 days · ₦35,000/yr from day 9'
+            : 'Billed yearly · Cancel anytime from settings'}
         </Text>
       </View>
     </View>

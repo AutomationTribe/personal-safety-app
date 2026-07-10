@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   BackHandler,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -11,10 +12,13 @@ import {
   Text,
   View,
 } from 'react-native';
-import { Feather } from '@expo/vector-icons';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import MapView, { Marker } from 'react-native-maps';
+import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppStackParamList } from '../../navigation/AppNavigator';
 import { supabase } from '../../lib/supabase';
 import { useNetworkStatus } from '../../hooks/useNetworkStatus';
@@ -24,6 +28,14 @@ import { getContacts } from '../../services/CircleService';
 import { colors, fontSizes, spacing } from '../../styles/tokens';
 import StartTripModal, { Trip } from './StartTripModal';
 import SuccessToast from '../../components/SuccessToast';
+import HadinLogo from '../../components/HadinLogo';
+
+// ── AsyncStorage keys ─────────────────────────────────────────────────────────
+
+const SETUP_GPS_KEY = 'HADIN_SETUP_GPS';
+const SETUP_AUDIO_KEY = 'HADIN_SETUP_AUDIO';
+const SOS_PIN_KEY = 'HADIN_SOS_PIN';
+const USER_MODE_KEY = 'HADIN_USER_MODE';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -34,30 +46,28 @@ interface Contact {
   relationship: string | null;
 }
 
-// Extends SOSContact with the relationship field we fetch for display
 interface CircleContact extends SOSContact {
   relationship?: string | null;
 }
 
+interface FamilyGroup {
+  id: string;
+  name: string;
+  member_count: number;
+}
+
+type SetupStep = 'gps' | 'audio' | 'pin';
+type UserMode = 'always_on' | 'trip';
+type UserPlan = 'basic' | 'elite';
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function initials(name: string): string {
-  return name
-    .split(' ')
-    .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase() ?? '')
-    .join('');
+  return name.split(' ').slice(0, 2).map((w) => w[0]?.toUpperCase() ?? '').join('');
 }
 
 function firstName(fullName: string): string {
   return fullName.split(' ')[0] ?? fullName;
-}
-
-function greeting(): string {
-  const h = new Date().getHours();
-  if (h < 12) return 'Good morning';
-  if (h < 17) return 'Good afternoon';
-  return 'Good evening';
 }
 
 function formatDate(iso: string): string {
@@ -68,7 +78,6 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' });
 }
 
-// Deterministic avatar colours so the same contact always gets the same palette entry
 const AVATAR_PALETTE = [
   { bg: '#E6F1FB', fg: '#0C447C' },
   { bg: '#EAF3DE', fg: '#27500A' },
@@ -82,6 +91,13 @@ function avatarColors(index: number) {
   return AVATAR_PALETTE[index % AVATAR_PALETTE.length];
 }
 
+const NIGERIA_DEFAULT = {
+  latitude: 6.524,
+  longitude: 3.379,
+  latitudeDelta: 0.05,
+  longitudeDelta: 0.05,
+};
+
 // ── HomeScreen ────────────────────────────────────────────────────────────────
 
 const HomeScreen = () => {
@@ -89,11 +105,14 @@ const HomeScreen = () => {
   const { isOnline } = useNetworkStatus();
 
   const [userName, setUserName] = useState('');
+  const [userPlan, setUserPlan] = useState<UserPlan>('basic');
   const [activeTrip, setActiveTrip] = useState<Trip | null>(null);
   const [recentTrips, setRecentTrips] = useState<Trip[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [familyGroups, setFamilyGroups] = useState<FamilyGroup[]>([]);
   const [lastPing, setLastPing] = useState<LocationPing | null>(null);
   const [loading, setLoading] = useState(true);
+  const [locationGranted, setLocationGranted] = useState(true);
   const [showStartModal, setShowStartModal] = useState(false);
   const [toast, setToast] = useState<{ visible: boolean; title: string; subtitle?: string; duration?: number }>({ visible: false, title: '' });
 
@@ -107,34 +126,26 @@ const HomeScreen = () => {
   const [tripContacts, setTripContacts] = useState<CircleContact[]>([]);
   const [showEndModal, setShowEndModal] = useState(false);
 
+  // Setup checklist state
+  const [setupStep, setSetupStep] = useState<SetupStep | null>(null);
+  const [pinInput, setPinInput] = useState('');
+  const [pinFirst, setPinFirst] = useState('');
+  const [pinStage, setPinStage] = useState<'enter' | 'confirm'>('enter');
+  const [pinError, setPinError] = useState('');
+
   // ── Data loading ────────────────────────────────────────────────────────────
 
   const loadData = useCallback(async () => {
     try {
-      const [{ data: { user } }, activeTripRes, recentRes, contactsRes, tripContactsRes] = await Promise.all([
-        supabase.auth.getUser(),
-        supabase
-          .from('trips')
-          .select('*')
-          .eq('status', 'active')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle(),
-        supabase
-          .from('trips')
-          .select('*')
-          .neq('status', 'active')
-          .order('created_at', { ascending: false })
-          .limit(3),
-        supabase
-          .from('trusted_contacts')
-          .select('id, name, phone, relationship')
-          .order('created_at', { ascending: true })
-          .limit(2),
-        supabase
-          .from('trusted_contacts')
-          .select('id, name, phone, relationship')
-          .order('created_at', { ascending: true }),
+      const { data: { user } } = await supabase.auth.getUser();
+      const userId = user?.id ?? '';
+
+      const [activeTripRes, recentRes, contactsRes, tripContactsRes, profileRes] = await Promise.all([
+        supabase.from('trips').select('*').eq('status', 'active').order('created_at', { ascending: false }).limit(1).maybeSingle(),
+        supabase.from('trips').select('*').neq('status', 'active').order('created_at', { ascending: false }).limit(3),
+        supabase.from('trusted_contacts').select('id, name, phone, relationship').order('created_at', { ascending: true }).limit(2),
+        supabase.from('trusted_contacts').select('id, name, phone, relationship').order('created_at', { ascending: true }),
+        supabase.from('profiles').select('plan, subscription_status').eq('id', userId).maybeSingle(),
       ]);
 
       const meta = user?.user_metadata as { full_name?: string } | undefined;
@@ -143,6 +154,25 @@ const HomeScreen = () => {
       setRecentTrips((recentRes.data as Trip[]) ?? []);
       setContacts((contactsRes.data as Contact[]) ?? []);
       setTripContacts((tripContactsRes.data ?? []) as CircleContact[]);
+
+      const profileData = profileRes.data as { plan?: string } | null;
+      const plan: UserPlan = profileData?.plan === 'elite' ? 'elite' : 'basic';
+      setUserPlan(plan);
+
+      // Fetch family groups for elite users (silent failure if table missing)
+      if (plan === 'elite' && userId) {
+        try {
+          const { data } = await supabase
+            .from('family_groups')
+            .select('id, name, member_count')
+            .eq('owner_id', userId)
+            .order('created_at', { ascending: true })
+            .limit(2);
+          setFamilyGroups((data as FamilyGroup[]) ?? []);
+        } catch {
+          setFamilyGroups([]);
+        }
+      }
 
       const ping = await getLastPing();
       setLastPing(ping);
@@ -157,19 +187,58 @@ const HomeScreen = () => {
     loadData();
   }, [loadData]);
 
-  // Realtime: watch trips table for status changes.
-  // Unique channel name per mount prevents the "cannot add callbacks after subscribe()" error
-  // that fires in StrictMode or when navigating back to this screen.
+  // Check location permission
+  useEffect(() => {
+    Location.getForegroundPermissionsAsync()
+      .then(({ status }) => setLocationGranted(status === 'granted'))
+      .catch(() => null);
+  }, []);
+
+  // Realtime: watch trips table for status changes
   useEffect(() => {
     const channel = supabase
       .channel(`home-trips-${Date.now()}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, () => {
-        loadData();
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, () => { loadData(); })
       .subscribe();
-
     return () => { supabase.removeChannel(channel); };
   }, [loadData]);
+
+  // Setup checklist check (runs after data loads)
+  const checkSetupSteps = useCallback(async () => {
+    // Step 1: GPS
+    const gpsSetup = await AsyncStorage.getItem(SETUP_GPS_KEY).catch(() => null);
+    if (!gpsSetup) {
+      const { status } = await Location.getForegroundPermissionsAsync().catch(() => ({ status: 'denied' as const }));
+      if (status === 'granted') {
+        await AsyncStorage.setItem(SETUP_GPS_KEY, 'done').catch(() => null);
+      } else {
+        setSetupStep('gps');
+        return;
+      }
+    }
+
+    // Step 2: Audio
+    const audioSetup = await AsyncStorage.getItem(SETUP_AUDIO_KEY).catch(() => null);
+    if (!audioSetup) {
+      setSetupStep('audio');
+      return;
+    }
+
+    // Step 3: SOS PIN
+    const pin = await AsyncStorage.getItem(SOS_PIN_KEY).catch(() => null);
+    if (!pin) {
+      setSetupStep('pin');
+      return;
+    }
+
+    setSetupStep(null);
+  }, []);
+
+  useEffect(() => {
+    if (!loading) {
+      checkSetupSteps();
+    }
+  }, [loading, checkSetupSteps]);
 
   // Reset SOS state when no active trip
   useEffect(() => {
@@ -183,6 +252,62 @@ const HomeScreen = () => {
     }
   }, [activeTrip]);
 
+  // ── Setup step handlers ──────────────────────────────────────────────────────
+
+  const handleGpsEnable = async () => {
+    await Linking.openSettings().catch(() => null);
+    // Re-check permission after user returns from settings
+    const { status } = await Location.getForegroundPermissionsAsync().catch(() => ({ status: 'denied' as const }));
+    if (status === 'granted') {
+      await AsyncStorage.setItem(SETUP_GPS_KEY, 'done').catch(() => null);
+      setLocationGranted(true);
+      await checkSetupSteps();
+    }
+  };
+
+  const handleAudioEnable = async () => {
+    await Linking.openSettings().catch(() => null);
+    await AsyncStorage.setItem(SETUP_AUDIO_KEY, 'done').catch(() => null);
+    await checkSetupSteps();
+  };
+
+  const handleAudioSkip = async () => {
+    await AsyncStorage.setItem(SETUP_AUDIO_KEY, 'skipped').catch(() => null);
+    await checkSetupSteps();
+  };
+
+  const handlePinDigit = async (digit: string) => {
+    const next = pinInput + digit;
+    setPinInput(next);
+    setPinError('');
+
+    if (next.length < 4) return;
+
+    if (pinStage === 'enter') {
+      setPinFirst(next);
+      setPinInput('');
+      setPinStage('confirm');
+    } else {
+      if (next === pinFirst) {
+        await AsyncStorage.setItem(SOS_PIN_KEY, next).catch(() => null);
+        setPinInput('');
+        setPinFirst('');
+        setPinStage('enter');
+        await checkSetupSteps();
+      } else {
+        setPinError("PINs don't match — try again");
+        setPinInput('');
+        setPinStage('enter');
+        setPinFirst('');
+      }
+    }
+  };
+
+  const handlePinBackspace = () => {
+    setPinInput((p) => p.slice(0, -1));
+    setPinError('');
+  };
+
   // ── Trip actions ────────────────────────────────────────────────────────────
 
   const handleStartTrip = async () => {
@@ -190,7 +315,7 @@ const HomeScreen = () => {
     if (circle.length === 0) {
       Alert.alert(
         'Add contacts first',
-        'You need at least one person in your circle before starting a trip. They will be notified if you send an SOS.',
+        'You need at least one person in your circle before starting a trip.',
         [
           { text: 'Cancel', style: 'cancel' },
           { text: 'Go to Circle', onPress: () => navigation.navigate('Circle') },
@@ -215,10 +340,7 @@ const HomeScreen = () => {
     if (!activeTrip) return;
     setShowEndModal(false);
     try {
-      await supabase
-        .from('trips')
-        .update({ status: 'completed', ended_at: new Date().toISOString() })
-        .eq('id', activeTrip.id);
+      await supabase.from('trips').update({ status: 'completed', ended_at: new Date().toISOString() }).eq('id', activeTrip.id);
       await stopTracking();
       setActiveTrip(null);
       setSosActive(false);
@@ -245,7 +367,6 @@ const HomeScreen = () => {
       setSosActive(true);
       setSosEventId(result.eventId);
     } else {
-      // SOSService opened the native SMS app as fallback — show toast when user returns
       setSosActive(false);
       setToast({ visible: true, title: 'SOS sent via SMS', duration: 4000 });
     }
@@ -274,7 +395,7 @@ const HomeScreen = () => {
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <Text style={styles.loadingText}>Loading…</Text>
+        <ActivityIndicator size="large" color={colors.brand.primary} />
       </View>
     );
   }
@@ -330,8 +451,12 @@ const HomeScreen = () => {
         isOnline={isOnline}
         recentTrips={recentTrips}
         contacts={contacts}
+        userPlan={userPlan}
+        locationGranted={locationGranted}
+        familyGroups={familyGroups}
         onStartTrip={handleStartTrip}
         onNavigateToCircle={() => navigation.navigate('Circle')}
+        onAddCircleMember={() => navigation.navigate('Circle', { openAddModal: true })}
         onNavigateToRoutes={() => navigation.navigate('Routes')}
         onNavigateToSettings={() => navigation.navigate('Settings')}
       />
@@ -340,135 +465,455 @@ const HomeScreen = () => {
         onClose={() => setShowStartModal(false)}
         onTripStarted={handleTripStarted}
       />
+
+      {/* ── Setup checklist modals ── */}
+      <SetupModal
+        step={setupStep}
+        pinInput={pinInput}
+        pinStage={pinStage}
+        pinError={pinError}
+        onGpsEnable={handleGpsEnable}
+        onAudioEnable={handleAudioEnable}
+        onAudioSkip={handleAudioSkip}
+        onPinDigit={handlePinDigit}
+        onPinBackspace={handlePinBackspace}
+      />
     </>
   );
 };
 
-// ── Idle state ─────────────────────────────────────────────────────────────────
+// ── Setup checklist modal ─────────────────────────────────────────────────────
+
+interface SetupModalProps {
+  step: SetupStep | null;
+  pinInput: string;
+  pinStage: 'enter' | 'confirm';
+  pinError: string;
+  onGpsEnable: () => void;
+  onAudioEnable: () => void;
+  onAudioSkip: () => void;
+  onPinDigit: (d: string) => void;
+  onPinBackspace: () => void;
+}
+
+const PIN_PAD = [['1','2','3'],['4','5','6'],['7','8','9'],['','0','⌫']] as const;
+
+const SetupModal = ({
+  step, pinInput, pinStage, pinError,
+  onGpsEnable, onAudioEnable, onAudioSkip, onPinDigit, onPinBackspace,
+}: SetupModalProps) => {
+  const insets = useSafeAreaInsets();
+  if (!step) return null;
+
+  return (
+    <Modal visible animationType="fade" transparent statusBarTranslucent>
+      <View style={smStyles.overlay}>
+        <View style={[smStyles.card, { paddingBottom: Math.max(insets.bottom, 24) }]}>
+
+          {/* GPS step */}
+          {step === 'gps' && (
+            <>
+              <View style={smStyles.iconCircle}>
+                <Feather name="map-pin" size={28} color={colors.white} />
+              </View>
+              <Text style={smStyles.title}>Enable Location Access</Text>
+              <Text style={smStyles.body}>
+                Hadin needs your location to track trips and send your position during an SOS.
+                Tap Enable to open your phone's location settings.
+              </Text>
+              <Pressable
+                style={({ pressed }) => [smStyles.primaryBtn, pressed && smStyles.pressed]}
+                onPress={onGpsEnable}
+              >
+                <Text style={smStyles.primaryBtnText}>Enable Location</Text>
+              </Pressable>
+            </>
+          )}
+
+          {/* Audio step */}
+          {step === 'audio' && (
+            <>
+              <View style={[smStyles.iconCircle, smStyles.iconCircleAudio]}>
+                <Feather name="mic" size={28} color={colors.white} />
+              </View>
+              <Text style={smStyles.title}>Enable Microphone Access</Text>
+              <Text style={smStyles.body}>
+                Microphone access allows Hadin to use voice-activated SOS and audio alerts.
+                You can skip this for now.
+              </Text>
+              <Pressable
+                style={({ pressed }) => [smStyles.primaryBtn, pressed && smStyles.pressed]}
+                onPress={onAudioEnable}
+              >
+                <Text style={smStyles.primaryBtnText}>Enable Microphone</Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [smStyles.skipBtn, pressed && smStyles.pressed]}
+                onPress={onAudioSkip}
+              >
+                <Text style={smStyles.skipBtnText}>Skip for now</Text>
+              </Pressable>
+            </>
+          )}
+
+          {/* SOS PIN step */}
+          {step === 'pin' && (
+            <>
+              <View style={[smStyles.iconCircle, smStyles.iconCirclePin]}>
+                <Feather name="shield" size={28} color={colors.white} />
+              </View>
+              <Text style={smStyles.title}>
+                {pinStage === 'enter' ? 'Create Your SOS PIN' : 'Confirm Your PIN'}
+              </Text>
+              <Text style={smStyles.body}>
+                {pinStage === 'enter'
+                  ? 'Set a 4-digit PIN to quickly confirm safe arrival or cancel a false SOS alert.'
+                  : 'Enter the same PIN again to confirm.'}
+              </Text>
+
+              {/* PIN dots */}
+              <View style={smStyles.pinDots}>
+                {[0, 1, 2, 3].map((i) => (
+                  <View
+                    key={i}
+                    style={[smStyles.pinDot, pinInput.length > i && smStyles.pinDotFilled]}
+                  />
+                ))}
+              </View>
+
+              {pinError ? <Text style={smStyles.pinError}>{pinError}</Text> : null}
+
+              {/* Numpad */}
+              <View style={smStyles.numpad}>
+                {PIN_PAD.map((row, ri) => (
+                  <View key={ri} style={smStyles.numpadRow}>
+                    {row.map((key) => {
+                      if (key === '') return <View key="empty" style={smStyles.numpadKey} />;
+                      if (key === '⌫') {
+                        return (
+                          <Pressable
+                            key="back"
+                            style={({ pressed }) => [smStyles.numpadKey, pressed && smStyles.numpadPressed]}
+                            onPress={onPinBackspace}
+                          >
+                            <Feather name="delete" size={20} color={colors.brand.textPrimary} />
+                          </Pressable>
+                        );
+                      }
+                      return (
+                        <Pressable
+                          key={key}
+                          style={({ pressed }) => [smStyles.numpadKey, pressed && smStyles.numpadPressed]}
+                          onPress={() => onPinDigit(key)}
+                          disabled={pinInput.length >= 4}
+                        >
+                          <Text style={smStyles.numpadKeyText}>{key}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                ))}
+              </View>
+            </>
+          )}
+
+        </View>
+      </View>
+    </Modal>
+  );
+};
+
+// ── Idle view ─────────────────────────────────────────────────────────────────
 
 interface IdleViewProps {
   userName: string;
   isOnline: boolean;
   recentTrips: Trip[];
   contacts: Contact[];
+  userPlan: UserPlan;
+  locationGranted: boolean;
+  familyGroups: FamilyGroup[];
   onStartTrip: () => void;
   onNavigateToCircle: () => void;
+  onAddCircleMember: () => void;
   onNavigateToRoutes: () => void;
   onNavigateToSettings: () => void;
 }
 
-const IdleView = ({ userName, isOnline, recentTrips, contacts, onStartTrip, onNavigateToCircle, onNavigateToRoutes, onNavigateToSettings }: IdleViewProps) => {
+const IdleView = ({
+  userName, isOnline, recentTrips, contacts, userPlan, locationGranted, familyGroups,
+  onStartTrip, onNavigateToCircle, onAddCircleMember, onNavigateToRoutes, onNavigateToSettings,
+}: IdleViewProps) => {
   const insets = useSafeAreaInsets();
+  const visibleContacts = contacts.slice(0, 2);
+  const historyItems = recentTrips.slice(0, 2);
+
+  // User mode toggle
+  const [userMode, setUserMode] = useState<UserMode>('always_on');
+  const alwaysOnSub = useRef<Location.LocationSubscription | null>(null);
+
+  useEffect(() => {
+    AsyncStorage.getItem(USER_MODE_KEY)
+      .then((v) => { if (v === 'always_on' || v === 'trip') setUserMode(v); })
+      .catch(() => null);
+    return () => { alwaysOnSub.current?.remove(); };
+  }, []);
+
+  const handleModeToggle = async (mode: UserMode) => {
+    if (mode === 'always_on' && userPlan === 'basic') return;
+    setUserMode(mode);
+    await AsyncStorage.setItem(USER_MODE_KEY, mode).catch(() => null);
+
+    if (mode === 'always_on') {
+      // Start foreground location watcher for live map updates
+      Location.getForegroundPermissionsAsync().then(({ status }) => {
+        if (status !== 'granted') return;
+        Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.Balanced, timeInterval: 60_000, distanceInterval: 100 },
+          (pos) => {
+            const { latitude, longitude } = pos.coords;
+            setMapRegion({ latitude, longitude, latitudeDelta: 0.01, longitudeDelta: 0.01 });
+          },
+        ).then((sub) => {
+          alwaysOnSub.current?.remove();
+          alwaysOnSub.current = sub;
+        }).catch(() => null);
+      }).catch(() => null);
+    } else {
+      alwaysOnSub.current?.remove();
+      alwaysOnSub.current = null;
+    }
+  };
+
+  // Real GPS location for map
+  const [mapRegion, setMapRegion] = useState(NIGERIA_DEFAULT);
+  const [locationName, setLocationName] = useState('Detecting location…');
+
+  useEffect(() => {
+    if (!locationGranted) return;
+    Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
+      .then(async (pos) => {
+        const { latitude, longitude } = pos.coords;
+        setMapRegion({ latitude, longitude, latitudeDelta: 0.01, longitudeDelta: 0.01 });
+        const [addr] = await Location.reverseGeocodeAsync({ latitude, longitude }).catch(() => [null]);
+        if (addr) {
+          const parts = [addr.city ?? addr.subregion, addr.region].filter(Boolean);
+          setLocationName(parts.join(', ') || 'Current location');
+        } else {
+          setLocationName('Current location');
+        }
+      })
+      .catch(() => null);
+  }, [locationGranted]);
+
   return (
-  <View style={styles.idleRoot}>
-    {/* Header */}
-    <View style={[styles.idleHeader, { paddingTop: insets.top + 10 }]}>
-      <View>
-        <Text style={styles.idleGreeting}>{greeting()},</Text>
-        <Text style={styles.idleName}>{firstName(userName) || 'Traveller'}</Text>
+    <View style={styles.idleRoot}>
+      <View style={[styles.dashboardTop, { paddingTop: insets.top + 8 }]}>
+        <HadinLogo size={27} />
       </View>
-      <View style={styles.headerRight}>
-        <View style={[styles.statusPill, isOnline ? styles.statusPillOnline : styles.statusPillOffline]}>
-          <View style={[styles.statusDot, isOnline ? styles.statusDotOnline : styles.statusDotOffline]} />
-          <Text style={[styles.statusPillText, isOnline ? styles.statusPillTextOnline : styles.statusPillTextOffline]}>
-            {isOnline ? 'All safe · Online' : 'Offline'}
-          </Text>
+
+      <ScrollView
+        style={styles.idleScroll}
+        contentContainerStyle={[styles.idleScrollContent, { paddingBottom: insets.bottom + 78 }]}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Mode toggle */}
+        <View style={styles.modeRow}>
+          <Pressable
+            style={styles.modeSegmentActive}
+          >
+            <Feather name="check-circle" size={15} color="#10B981" />
+            <Text style={styles.alwaysOnText}>Always On</Text>
+          </Pressable>
+          <Pressable
+            style={styles.modeSegmentInactive}
+            onPress={onStartTrip}
+          >
+            <MaterialCommunityIcons name="run" size={15} color="#111827" />
+            <Text style={styles.tripModeText}>Trip Mode</Text>
+          </Pressable>
         </View>
-        {userName ? (
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{initials(userName)}</Text>
+
+        {/* Map */}
+        <View style={styles.mapFullBleed}>
+          <View style={styles.mapCard}>
+            <MapView
+              style={StyleSheet.absoluteFill}
+              region={mapRegion}
+              scrollEnabled={false}
+              zoomEnabled={false}
+              rotateEnabled={false}
+              pitchEnabled={false}
+            >
+              <Marker coordinate={{ latitude: mapRegion.latitude, longitude: mapRegion.longitude }} />
+            </MapView>
+
+            {/* Location badge */}
+            <View style={styles.locationBadge}>
+              <View style={styles.locationBadgeIcon}>
+                <Feather name="map-pin" size={15} color="#1F8A63" />
+              </View>
+              <View>
+                <Text style={styles.locationEyebrow}>CURRENT LOCATION</Text>
+                <Text style={styles.locationText} numberOfLines={1}>{locationName}</Text>
+              </View>
+            </View>
+
+            {/* Map controls */}
+            <View style={styles.mapControls}>
+              <Pressable style={styles.mapControlBtn}>
+                <Feather name="sliders" size={20} color="#111827" />
+              </Pressable>
+              <Pressable
+                style={styles.mapControlBtn}
+                onPress={() => {
+                  setMapRegion(NIGERIA_DEFAULT);
+                }}
+              >
+                <Feather name="crosshair" size={20} color="#111827" />
+              </Pressable>
+              <Pressable style={styles.mapControlBtn}>
+                <Feather name="phone" size={20} color="#111827" />
+              </Pressable>
+              <Pressable
+                style={styles.sosFab}
+                onPress={onStartTrip}
+              >
+                <Text style={styles.sosStar}>✱</Text>
+                <Text style={styles.sosText}>SOS</Text>
+              </Pressable>
+            </View>
           </View>
-        ) : null}
+        </View>
+
+        {/* My Safety Circle */}
+        <View style={styles.safetyCircleSection}>
+          <DashboardSection title="My Safety Circle" action="View All" onAction={onNavigateToCircle}>
+            {visibleContacts.map((c) => (
+              <View key={c.id} style={styles.dashboardContactRow}>
+                <View style={styles.dashboardAvatar}>
+                  <Text style={styles.dashboardAvatarText}>{initials(c.name)}</Text>
+                </View>
+                <View style={styles.dashboardRowMid}>
+                  <Text style={styles.dashboardContactName}>{c.name}</Text>
+                  <Text style={styles.dashboardContactMeta}>{c.relationship ?? 'Trusted Contact'}</Text>
+                </View>
+                <Feather name="check-circle" size={18} color="#10B981" />
+              </View>
+            ))}
+            <Pressable style={styles.addCircleCard} onPress={onAddCircleMember}>
+              <View style={styles.addCircleIcon}>
+                <Feather name="user-plus" size={17} color="#111827" />
+              </View>
+              <View style={styles.dashboardRowMid}>
+                <Text style={styles.addCircleTitle}>Add a Circle Member</Text>
+                <Text style={styles.addCircleMeta}>Invite someone to watch over you</Text>
+              </View>
+            </Pressable>
+          </DashboardSection>
+        </View>
+
+        {/* History */}
+        <DashboardSection title="History" action="View All" onAction={onNavigateToRoutes}>
+          {historyItems.length === 0 ? (
+            <View style={styles.emptyHistoryCard}>
+              <Feather name="clock" size={20} color="#D1D5DB" />
+              <Text style={styles.emptyHistoryText}>No trips yet</Text>
+            </View>
+          ) : (
+            historyItems.map((trip, index) => (
+              <View key={trip.id ?? index} style={styles.historyRow}>
+                <View style={styles.historyIcon}>
+                  <Feather name={index === 0 ? 'home' : 'git-pull-request'} size={17} color="#6B7280" />
+                </View>
+                <Text style={styles.historyTitle} numberOfLines={1}>
+                  {trip.origin && trip.origin !== '—' ? trip.origin : 'Trip'}
+                </Text>
+                <Text style={styles.historyTime}>
+                  {trip.created_at ? formatDate(trip.created_at) : ''}
+                </Text>
+              </View>
+            ))
+          )}
+        </DashboardSection>
+
+        {/* Family Groups */}
+        <DashboardSection title="Family Groups" action="View All" onAction={onNavigateToCircle}>
+          {userPlan === 'basic' ? (
+            <View style={styles.upgradeCard}>
+              <View style={styles.upgradeLockIcon}>
+                <Feather name="lock" size={20} color="#6B21A8" />
+              </View>
+              <View style={styles.dashboardRowMid}>
+                <Text style={styles.upgradeCardTitle}>Unlock with Elite Plan</Text>
+                <Text style={styles.upgradeCardMeta}>Manage family groups, share live location with family</Text>
+              </View>
+              <Feather name="chevron-right" size={16} color="#6B21A8" />
+            </View>
+          ) : familyGroups.length === 0 ? (
+            <Pressable style={styles.addCircleCard} onPress={onNavigateToCircle}>
+              <View style={[styles.addCircleIcon, styles.familyAddIcon]}>
+                <Feather name="users" size={17} color={colors.white} />
+              </View>
+              <View>
+                <Text style={styles.addCircleTitle}>Add a Family Group</Text>
+                <Text style={styles.addCircleMeta}>Create a group to share your location</Text>
+              </View>
+            </Pressable>
+          ) : (
+            familyGroups.map((group) => (
+              <View key={group.id} style={styles.familyCard}>
+                <View style={styles.familyIcon}>
+                  <Feather name="users" size={18} color={colors.white} />
+                </View>
+                <View style={styles.dashboardRowMid}>
+                  <Text style={styles.dashboardContactName}>{group.name}</Text>
+                  <Text style={styles.dashboardContactMeta}>{group.member_count} members</Text>
+                </View>
+                <View style={styles.activeStatus}>
+                  <View style={styles.activeDot} />
+                  <Text style={styles.activeStatusText}>Active</Text>
+                </View>
+              </View>
+            ))
+          )}
+        </DashboardSection>
+      </ScrollView>
+
+      {/* Tab bar */}
+      <View style={[styles.tabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
+        <TabBarItem icon="grid" label="Dashboard" active />
+        <TabBarItem icon="users" label="Circle" onPress={onNavigateToCircle} />
+        <TabBarItem icon="clock" label="History" onPress={onNavigateToRoutes} />
+        <TabBarItem icon="user" label="Profile" onPress={onNavigateToSettings} />
       </View>
     </View>
-
-    <ScrollView style={styles.idleScroll} contentContainerStyle={styles.idleScrollContent} showsVerticalScrollIndicator={false}>
-      {/* Hero card */}
-      <View style={styles.heroCard}>
-        <Text style={styles.heroEyebrow}>TRAVEL SAFE</Text>
-        <Text style={styles.heroHeadline}>Your people travel{'\n'}with you in spirit.</Text>
-        <Text style={styles.heroSubtitle}>
-          Track every leg of your journey. Your circle sees you live — so you never travel alone.
-        </Text>
-        <Pressable
-          style={({ pressed }) => [styles.heroCta, pressed && styles.heroCtaPressed]}
-          onPress={contacts.length === 0 ? onNavigateToCircle : onStartTrip}
-        >
-          <Text style={styles.heroCtaText}>
-            {contacts.length === 0 ? 'Add a contact first →' : 'Start a trip  →'}
-          </Text>
-        </Pressable>
-      </View>
-
-      {/* Recent journeys */}
-      <View style={styles.sectionCard}>
-        <Text style={styles.sectionTitle}>Recent journeys</Text>
-        {recentTrips.length === 0 ? (
-          <Text style={styles.emptyText}>No trips yet. Start your first journey.</Text>
-        ) : (
-          recentTrips.map((trip) => (
-            <View key={trip.id} style={styles.tripRow}>
-              <View style={styles.tripRouteIcon}>
-                <Feather name="map-pin" size={14} color={colors.brand.primary} />
-              </View>
-              <View style={styles.tripRowMid}>
-                <Text style={styles.tripRoute} numberOfLines={1}>
-                  {trip.origin ?? '—'}  →  {trip.destination ?? '—'}
-                </Text>
-                <Text style={styles.tripMeta}>
-                  {formatDate(trip.created_at)}
-                  {trip.expected_duration_minutes ? `  ·  ${trip.expected_duration_minutes}min` : ''}
-                </Text>
-              </View>
-              <View style={[styles.tripBadge, trip.status === 'sos' ? styles.tripBadgeSOS : styles.tripBadgeSafe]}>
-                <Text style={[styles.tripBadgeText, trip.status === 'sos' ? styles.tripBadgeTextSOS : styles.tripBadgeTextSafe]}>
-                  {trip.status === 'sos' ? 'SOS' : 'Safe'}
-                </Text>
-              </View>
-            </View>
-          ))
-        )}
-      </View>
-
-      {/* Your circle */}
-      <View style={styles.sectionCard}>
-        <Text style={styles.sectionTitle}>Your circle</Text>
-        {contacts.length === 0 ? (
-          <Text style={styles.emptyText}>Add trusted contacts who will be notified when you travel.</Text>
-        ) : (
-          contacts.map((c) => (
-            <View key={c.id} style={styles.contactRow}>
-              <View style={styles.contactAvatar}>
-                <Text style={styles.contactAvatarText}>{initials(c.name)}</Text>
-              </View>
-              <View style={styles.contactInfo}>
-                <Text style={styles.contactName}>{c.name}</Text>
-                <Text style={styles.contactSub}>
-                  {c.relationship ?? 'Contact'}  ·  will be notified
-                </Text>
-              </View>
-            </View>
-          ))
-        )}
-        <Pressable style={styles.addContactRow} onPress={onNavigateToCircle}>
-          <Feather name="plus-circle" size={16} color={colors.brand.primary} />
-          <Text style={styles.addContactText}>Add a trusted contact</Text>
-        </Pressable>
-      </View>
-    </ScrollView>
-
-    {/* Bottom tab bar */}
-    <View style={[styles.tabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
-      <TabBarItem icon="home" label="Home" active />
-      <TabBarItem icon="map" label="Routes" onPress={onNavigateToRoutes} />
-      <TabBarItem icon="users" label="Circle" onPress={onNavigateToCircle} />
-      <TabBarItem icon="settings" label="Settings" onPress={onNavigateToSettings} />
-    </View>
-  </View>
   );
 };
 
-// ── Active trip state ─────────────────────────────────────────────────────────
+// ── Section wrapper ───────────────────────────────────────────────────────────
+
+interface DashboardSectionProps {
+  title: string;
+  action: string;
+  onAction: () => void;
+  children: React.ReactNode;
+}
+
+const DashboardSection = ({ title, action, onAction, children }: DashboardSectionProps) => (
+  <View style={styles.dashboardSection}>
+    <View style={styles.dashboardSectionHeader}>
+      <Text style={styles.dashboardSectionTitle}>{title}</Text>
+      <Pressable style={styles.dashboardSectionAction} onPress={onAction}>
+        <Text style={styles.dashboardSectionActionText}>{action}</Text>
+        <Feather name="chevron-right" size={14} color="#6B21A8" />
+      </Pressable>
+    </View>
+    <View style={styles.dashboardSectionBody}>{children}</View>
+  </View>
+);
+
+// ── Active trip view ──────────────────────────────────────────────────────────
 
 interface ActiveTripViewProps {
   trip: Trip;
@@ -488,24 +933,11 @@ interface ActiveTripViewProps {
 }
 
 const ActiveTripView = ({
-  trip,
-  tripContacts,
-  lastPing,
-  sosLoading,
-  sosActive,
-  sosTime,
-  sosNotified,
-  sosTotal,
-  onSOSTap,
-  onCancelSOS,
-  onEndTrip,
-  onNavigateToCircle,
-  onNavigateToRoutes,
-  onNavigateToSettings,
+  trip, tripContacts, lastPing, sosLoading, sosActive, sosTime, sosNotified, sosTotal,
+  onSOSTap, onCancelSOS, onEndTrip, onNavigateToCircle, onNavigateToRoutes, onNavigateToSettings,
 }: ActiveTripViewProps) => {
   const insets = useSafeAreaInsets();
 
-  // Elapsed timer — updates every minute
   const [elapsed, setElapsed] = useState('');
   useEffect(() => {
     function compute() {
@@ -523,10 +955,7 @@ const ActiveTripView = ({
     if (Platform.OS === 'android') {
       BackHandler.exitApp();
     } else {
-      Alert.alert(
-        'Background Hadin',
-        'Swipe up and go home to background Hadin. Your trip is still active.',
-      );
+      Alert.alert('Background Hadin', 'Swipe up and go home to background Hadin. Your trip is still active.');
     }
   };
 
@@ -543,8 +972,6 @@ const ActiveTripView = ({
 
   return (
     <View style={[atStyles.root, { paddingTop: insets.top }]}>
-
-      {/* ── Banner ─────────────────────────────────────────────────────────── */}
       {sosActive ? (
         <View style={atStyles.sosBanner}>
           <View style={atStyles.sosBannerDot} />
@@ -570,7 +997,6 @@ const ActiveTripView = ({
         </View>
       )}
 
-      {/* ── Route header ───────────────────────────────────────────────────── */}
       <View style={atStyles.routeHdr}>
         <Text style={atStyles.routeText} numberOfLines={1}>
           {trip.origin ?? '—'}  →  {trip.destination ?? '—'}
@@ -585,8 +1011,6 @@ const ActiveTripView = ({
         contentContainerStyle={[atStyles.scrollContent, { paddingBottom: insets.bottom + 32 }]}
         showsVerticalScrollIndicator={false}
       >
-
-        {/* ── Stat row (normal state) ──────────────────────────────────────── */}
         {!sosActive && (
           <View style={atStyles.statRow}>
             <View style={atStyles.statBox}>
@@ -608,7 +1032,6 @@ const ActiveTripView = ({
           </View>
         )}
 
-        {/* ── Location card (normal state) ─────────────────────────────────── */}
         {!sosActive && (
           <View style={atStyles.card}>
             <Text style={atStyles.cardLbl}>Last known location</Text>
@@ -616,9 +1039,7 @@ const ActiveTripView = ({
               <>
                 <View style={atStyles.locRow}>
                   <Text style={atStyles.locKey}>Coordinates</Text>
-                  <Text style={atStyles.locVal}>
-                    {lastPing.lat.toFixed(4)}°N, {lastPing.lng.toFixed(4)}°E
-                  </Text>
+                  <Text style={atStyles.locVal}>{lastPing.lat.toFixed(4)}°N, {lastPing.lng.toFixed(4)}°E</Text>
                 </View>
                 <View style={[atStyles.locRow, atStyles.locRowLast]}>
                   <Text style={atStyles.locKey}>Updated</Text>
@@ -635,7 +1056,6 @@ const ActiveTripView = ({
           </View>
         )}
 
-        {/* ── SOS alert details (SOS sent state) ───────────────────────────── */}
         {sosActive && (
           <View style={atStyles.card}>
             <Text style={atStyles.cardLbl}>Alert details</Text>
@@ -645,20 +1065,15 @@ const ActiveTripView = ({
             </View>
             <View style={atStyles.alertRow}>
               <Text style={atStyles.alertKey}>Contacts reached</Text>
-              <Text style={[atStyles.alertVal, atStyles.alertValGreen]}>
-                {sosNotified} of {sosTotal}
-              </Text>
+              <Text style={[atStyles.alertVal, atStyles.alertValGreen]}>{sosNotified} of {sosTotal}</Text>
             </View>
             <View style={[atStyles.alertRow, atStyles.alertRowLast]}>
               <Text style={atStyles.alertKey}>Delivered via</Text>
-              <Text style={[atStyles.alertVal, atStyles.alertValGreen]}>
-                {sosNotified > 0 ? 'SMS' : 'SMS (fallback)'}
-              </Text>
+              <Text style={[atStyles.alertVal, atStyles.alertValGreen]}>{sosNotified > 0 ? 'SMS' : 'SMS (fallback)'}</Text>
             </View>
           </View>
         )}
 
-        {/* ── Notified contacts (SOS sent state) ───────────────────────────── */}
         {sosActive && tripContacts.length > 0 && (
           <View style={atStyles.card}>
             <Text style={atStyles.cardLbl}>Notified</Text>
@@ -679,7 +1094,6 @@ const ActiveTripView = ({
           </View>
         )}
 
-        {/* ── Circle on standby (normal state) ─────────────────────────────── */}
         {!sosActive && (
           <View style={atStyles.card}>
             <View style={atStyles.sbTop}>
@@ -695,9 +1109,7 @@ const ActiveTripView = ({
             </View>
 
             {tripContacts.length === 0 ? (
-              <Pressable onPress={onNavigateToCircle}>
-                <Text style={atStyles.emptyCircleTxt}>Add contacts to your circle →</Text>
-              </Pressable>
+              <Text style={atStyles.emptyCircleTxt}>Add contacts to your circle →</Text>
             ) : (
               <>
                 {visibleContacts.map((c, i) => {
@@ -715,7 +1127,6 @@ const ActiveTripView = ({
                     </View>
                   );
                 })}
-
                 {overflowContacts.length > 0 && (
                   <View style={atStyles.overflowRow}>
                     <View style={atStyles.stackedAvatars}>
@@ -739,14 +1150,9 @@ const ActiveTripView = ({
           </View>
         )}
 
-        {/* ── SOS button (normal state) ─────────────────────────────────────── */}
         {!sosActive && (
           <Pressable
-            style={({ pressed }) => [
-              atStyles.sosBtn,
-              pressed && !sosLoading && { opacity: 0.85 },
-              sosLoading && { opacity: 0.6 },
-            ]}
+            style={({ pressed }) => [atStyles.sosBtn, pressed && !sosLoading && { opacity: 0.85 }, sosLoading && { opacity: 0.6 }]}
             onPress={onSOSTap}
             disabled={sosLoading}
           >
@@ -759,15 +1165,12 @@ const ActiveTripView = ({
             </View>
             <View style={atStyles.sosTextBlock}>
               <Text style={atStyles.sosTitle}>Send SOS alert</Text>
-              <Text style={atStyles.sosSub}>
-                Notifies all {tripContacts.length} contact{tripContacts.length !== 1 ? 's' : ''} instantly
-              </Text>
+              <Text style={atStyles.sosSub}>Notifies all {tripContacts.length} contact{tripContacts.length !== 1 ? 's' : ''} instantly</Text>
             </View>
             <Feather name="chevron-right" size={20} color="rgba(255,255,255,0.55)" />
           </Pressable>
         )}
 
-        {/* ── Cancel SOS (SOS sent state) ───────────────────────────────────── */}
         {sosActive && (
           <Pressable
             style={({ pressed }) => [atStyles.cancelBtn, pressed && { opacity: 0.8 }]}
@@ -777,26 +1180,20 @@ const ActiveTripView = ({
           </Pressable>
         )}
 
-        {/* ── End trip ─────────────────────────────────────────────────────── */}
         <Pressable
           style={({ pressed }) => [atStyles.endBtn, pressed && { opacity: 0.7 }]}
           onPress={onEndTrip}
         >
-          <Text style={atStyles.endTxt}>
-            {sosActive ? 'End trip' : "I've arrived safely — end trip"}
-          </Text>
+          <Text style={atStyles.endTxt}>{sosActive ? 'End trip' : "I've arrived safely — end trip"}</Text>
         </Pressable>
-
       </ScrollView>
 
-      {/* ── Tab bar ──────────────────────────────────────────────────────────── */}
       <View style={[styles.atTabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
-        <TabBarItem icon="home" label="Home" active />
-        <TabBarItem icon="map" label="Routes" onPress={onNavigateToRoutes} />
+        <TabBarItem icon="grid" label="Dashboard" active />
         <TabBarItem icon="users" label="Circle" onPress={onNavigateToCircle} />
-        <TabBarItem icon="settings" label="Settings" onPress={onNavigateToSettings} />
+        <TabBarItem icon="clock" label="History" onPress={onNavigateToRoutes} />
+        <TabBarItem icon="user" label="Profile" onPress={onNavigateToSettings} />
       </View>
-
     </View>
   );
 };
@@ -813,7 +1210,6 @@ interface EndTripModalProps {
 
 const EndTripModal = ({ visible, trip, contactCount, onConfirm, onCancel }: EndTripModalProps) => {
   const [elapsed, setElapsed] = useState('');
-
   useEffect(() => {
     if (!visible) return;
     function compute() {
@@ -828,38 +1224,19 @@ const EndTripModal = ({ visible, trip, contactCount, onConfirm, onCancel }: EndT
   }, [visible, trip.created_at]);
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      statusBarTranslucent
-      onRequestClose={onCancel}
-    >
-      {/* Overlay — tap to dismiss */}
+    <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onCancel}>
       <Pressable style={etStyles.overlay} onPress={onCancel}>
-        {/* Card — swallow taps so they don't hit the overlay */}
         <Pressable style={etStyles.card} onPress={() => {}}>
-
-          {/* ── Trip summary header ───────────────────────────────────────── */}
           <View style={etStyles.header}>
             <View style={etStyles.routeRow}>
               <Feather name="navigation" size={13} color="rgba(255,255,255,0.5)" />
-              <Text style={etStyles.routeTxt} numberOfLines={1}>
-                {trip.origin ?? '—'}  →  {trip.destination ?? '—'}
-              </Text>
+              <Text style={etStyles.routeTxt} numberOfLines={1}>{trip.origin ?? '—'}  →  {trip.destination ?? '—'}</Text>
             </View>
             <Text style={etStyles.metaTxt}>
-              {[
-                elapsed,
-                contactCount > 0 ? `${contactCount} contact${contactCount !== 1 ? 's' : ''}` : null,
-              ].filter(Boolean).join('  ·  ')}
+              {[elapsed, contactCount > 0 ? `${contactCount} contact${contactCount !== 1 ? 's' : ''}` : null].filter(Boolean).join('  ·  ')}
             </Text>
           </View>
-
-          {/* ── Divider ──────────────────────────────────────────────────── */}
           <View style={etStyles.divider} />
-
-          {/* ── Body ─────────────────────────────────────────────────────── */}
           <View style={etStyles.body}>
             <Text style={etStyles.headline}>End this trip?</Text>
             <Text style={etStyles.subtext}>
@@ -868,21 +1245,13 @@ const EndTripModal = ({ visible, trip, contactCount, onConfirm, onCancel }: EndT
                 : 'GPS tracking will stop and your trip will be marked complete.'}
             </Text>
           </View>
-
-          {/* ── Primary CTA ───────────────────────────────────────────────── */}
-          <Pressable
-            style={({ pressed }) => [etStyles.confirmBtn, pressed && { opacity: 0.85 }]}
-            onPress={onConfirm}
-          >
+          <Pressable style={({ pressed }) => [etStyles.confirmBtn, pressed && { opacity: 0.85 }]} onPress={onConfirm}>
             <Feather name="check" size={18} color="#FFFFFF" />
             <Text style={etStyles.confirmTxt}>Yes, I'm safe</Text>
           </Pressable>
-
-          {/* ── Cancel link ───────────────────────────────────────────────── */}
           <Pressable style={etStyles.cancelLink} onPress={onCancel}>
             <Text style={etStyles.cancelLinkTxt}>Keep travelling</Text>
           </Pressable>
-
         </Pressable>
       </Pressable>
     </Modal>
@@ -890,99 +1259,20 @@ const EndTripModal = ({ visible, trip, contactCount, onConfirm, onCancel }: EndT
 };
 
 const etStyles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(10,26,17,0.75)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 28,
-  },
-  card: {
-    width: '100%',
-    backgroundColor: '#0E1F17',
-    borderRadius: 20,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.07)',
-  },
-
-  // Header
-  header: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 16,
-    backgroundColor: '#142C1F',
-  },
-  routeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 5,
-  },
-  routeTxt: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#FFFFFF',
-    letterSpacing: -0.3,
-    flex: 1,
-  },
-  metaTxt: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.45)',
-    fontWeight: '500',
-  },
-
-  divider: {
-    height: 0.5,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-
-  // Body
-  body: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 8,
-  },
-  headline: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#FFFFFF',
-    marginBottom: 8,
-  },
-  subtext: {
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.5)',
-    lineHeight: 19,
-  },
-
-  // Confirm button
-  confirmBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: '#1A6B4A',
-    marginHorizontal: 20,
-    marginTop: 20,
-    borderRadius: 12,
-    paddingVertical: 14,
-  },
-  confirmTxt: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
-
-  // Cancel link
-  cancelLink: {
-    alignItems: 'center',
-    paddingVertical: 16,
-  },
-  cancelLinkTxt: {
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.35)',
-    fontWeight: '500',
-  },
+  overlay: { flex: 1, backgroundColor: 'rgba(10,26,17,0.75)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 28 },
+  card: { width: '100%', backgroundColor: '#0E1F17', borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)' },
+  header: { paddingHorizontal: 20, paddingTop: 20, paddingBottom: 16, backgroundColor: '#142C1F' },
+  routeRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 5 },
+  routeTxt: { fontSize: 16, fontWeight: '800', color: '#FFFFFF', letterSpacing: -0.3, flex: 1 },
+  metaTxt: { fontSize: 12, color: 'rgba(255,255,255,0.45)', fontWeight: '500' },
+  divider: { height: 0.5, backgroundColor: 'rgba(255,255,255,0.08)' },
+  body: { paddingHorizontal: 20, paddingTop: 20, paddingBottom: 8 },
+  headline: { fontSize: 18, fontWeight: '700', color: '#FFFFFF', marginBottom: 8 },
+  subtext: { fontSize: 13, color: 'rgba(255,255,255,0.5)', lineHeight: 19 },
+  confirmBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#1A6B4A', marginHorizontal: 20, marginTop: 20, borderRadius: 12, paddingVertical: 14 },
+  confirmTxt: { fontSize: 15, fontWeight: '700', color: '#FFFFFF' },
+  cancelLink: { alignItems: 'center', paddingVertical: 16 },
+  cancelLinkTxt: { fontSize: 13, color: 'rgba(255,255,255,0.35)', fontWeight: '500' },
 });
 
 // ── Tab bar item ──────────────────────────────────────────────────────────────
@@ -997,571 +1287,301 @@ interface TabBarItemProps {
 
 const TabBarItem = ({ icon, label, active = false, dark = false, onPress }: TabBarItemProps) => (
   <Pressable style={styles.tabItem} onPress={onPress}>
-    <Feather
-      name={icon}
-      size={22}
-      color={
-        active
-          ? dark ? colors.brand.mid : colors.brand.primary
-          : dark ? 'rgba(255,255,255,0.35)' : colors.brand.textSecondary
-      }
-    />
+    <Feather name={icon} size={22} color={active ? (dark ? colors.brand.mid : '#6B21A8') : (dark ? 'rgba(255,255,255,0.35)' : colors.brand.textSecondary)} />
     {active && <View style={[styles.tabActiveLine, dark && styles.tabActiveLineDark]} />}
-    <Text style={[
-      styles.tabLabel,
-      active && (dark ? styles.tabLabelActiveDark : styles.tabLabelActive),
-      !active && dark && styles.tabLabelInactiveDark,
-    ]}>
+    <Text style={[styles.tabLabel, active && (dark ? styles.tabLabelActiveDark : styles.tabLabelActive), !active && dark && styles.tabLabelInactiveDark]}>
       {label}
     </Text>
   </Pressable>
 );
 
-// ── Shared styles ─────────────────────────────────────────────────────────────
+// ── Styles ────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  // Loading
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: colors.brand.bgWarm,
-  },
-  loadingText: {
-    color: colors.brand.textSecondary,
-    fontSize: fontSizes.body,
-  },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.brand.bgWarm },
 
-  // ── Idle ──────────────────────────────────────────────────────────────────
-  idleRoot: { flex: 1, backgroundColor: colors.brand.bgSurface },
-  idleHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: spacing.screenPadding,
-    paddingBottom: spacing.gap12,
-    backgroundColor: colors.brand.bgCard,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.brand.border,
-  },
-  idleGreeting: {
-    fontSize: fontSizes.caption,
-    color: colors.brand.textSecondary,
-    letterSpacing: 0.2,
-  },
-  idleName: {
-    fontSize: fontSizes.subheading,
-    fontWeight: '700',
-    color: colors.brand.textPrimary,
-    marginTop: 2,
-  },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.gap8 },
-  statusPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: spacing.gap8,
-    paddingVertical: 4,
-    borderRadius: 20,
-    gap: 5,
-  },
-  statusPillOnline: { backgroundColor: colors.brand.light },
-  statusPillOffline: { backgroundColor: '#FFF8E6' },
-  statusDot: { width: 6, height: 6, borderRadius: 3 },
-  statusDotOnline: { backgroundColor: colors.brand.primary },
-  statusDotOffline: { backgroundColor: '#D97706' },
-  statusPillText: { fontSize: fontSizes.small, fontWeight: '600' },
-  statusPillTextOnline: { color: colors.brand.primary },
-  statusPillTextOffline: { color: '#D97706' },
-  avatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: colors.brand.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  avatarText: { color: colors.white, fontSize: fontSizes.caption, fontWeight: '700' },
-
+  idleRoot: { flex: 1, backgroundColor: '#F6F7FA' },
+  dashboardTop: { alignItems: 'center', paddingBottom: 20, backgroundColor: '#F6F7FA' },
   idleScroll: { flex: 1 },
-  idleScrollContent: { paddingHorizontal: spacing.screenPadding, paddingTop: spacing.gap16, paddingBottom: 100 },
+  idleScrollContent: { paddingHorizontal: 8, paddingTop: 0 },
 
-  // Hero
-  heroCard: {
-    backgroundColor: colors.brand.primary,
-    borderRadius: spacing.borderRadiusLg,
-    padding: spacing.screenPadding,
-    marginBottom: spacing.gap16,
-  },
-  heroEyebrow: {
-    fontSize: fontSizes.small,
-    fontWeight: '700',
-    color: colors.brand.mid,
-    letterSpacing: 1.2,
-    marginBottom: spacing.gap8,
-  },
-  heroHeadline: {
-    fontSize: 26,
-    fontWeight: '800',
-    color: colors.white,
-    lineHeight: 34,
-    marginBottom: spacing.gap12,
-  },
-  heroSubtitle: {
-    fontSize: fontSizes.caption,
-    color: 'rgba(255,255,255,0.7)',
-    lineHeight: 20,
-    marginBottom: spacing.gap20,
-  },
-  heroCta: {
-    backgroundColor: colors.white,
-    alignSelf: 'flex-start',
-    paddingHorizontal: spacing.gap20,
-    paddingVertical: spacing.gap12,
-    borderRadius: spacing.borderRadius,
-  },
-  heroCtaPressed: { opacity: 0.85 },
-  heroCtaText: {
-    color: colors.brand.primary,
-    fontSize: fontSizes.body,
-    fontWeight: '700',
-  },
-
-  // Section cards
-  sectionCard: {
-    backgroundColor: colors.brand.bgCard,
-    borderRadius: spacing.borderRadiusLg,
-    padding: spacing.gap16,
-    marginBottom: spacing.gap16,
+  // GPS off banner
+  gpsBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#FEF3C7',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 8,
     borderWidth: 1,
-    borderColor: colors.brand.border,
+    borderColor: '#FDE68A',
   },
-  sectionTitle: {
-    fontSize: fontSizes.caption,
-    fontWeight: '700',
-    color: colors.brand.textSecondary,
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
-    marginBottom: spacing.gap12,
-  },
-  emptyText: {
-    fontSize: fontSizes.caption,
-    color: colors.brand.textSecondary,
-    lineHeight: 20,
-  },
+  gpsBannerText: { flex: 1, fontSize: 12, color: '#92400E', fontWeight: '600' },
 
-  // Trip rows
-  tripRow: {
+  // Mode toggle
+  modeRow: {
+    flexDirection: 'row',
+    marginHorizontal: 14,
+    marginBottom: 18,
+    height: 44,
+    borderRadius: 6,
+    padding: 3,
+    backgroundColor: '#E4E2E8',
+    borderWidth: 1,
+    borderColor: '#CFCAD6',
+  },
+  modeSegmentActive: {
+    flex: 1,
+    borderRadius: 5,
+    backgroundColor: '#3B008F',
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: spacing.gap8,
-    borderTopWidth: 1,
-    borderTopColor: colors.brand.border,
-    gap: spacing.gap12,
-  },
-  tripRouteIcon: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.brand.light,
     justifyContent: 'center',
-    alignItems: 'center',
+    gap: 6,
+    shadowColor: '#111827',
+    shadowOpacity: 0.12,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 2,
   },
-  tripRowMid: { flex: 1 },
-  tripRoute: { fontSize: fontSizes.caption, fontWeight: '600', color: colors.brand.textPrimary },
-  tripMeta: { fontSize: fontSizes.small, color: colors.brand.textSecondary, marginTop: 2 },
-  tripBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
-  tripBadgeSafe: { backgroundColor: colors.brand.light },
-  tripBadgeSOS: { backgroundColor: '#FDEDEC' },
-  tripBadgeText: { fontSize: fontSizes.small, fontWeight: '700' },
-  tripBadgeTextSafe: { color: colors.brand.primary },
-  tripBadgeTextSOS: { color: colors.brand.sos },
-
-  // Contact rows
-  contactRow: {
+  modeSegmentInactive: {
+    flex: 1,
+    borderRadius: 5,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: spacing.gap8,
-    borderTopWidth: 1,
-    borderTopColor: colors.brand.border,
-    gap: spacing.gap12,
-  },
-  contactAvatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: colors.brand.light,
     justifyContent: 'center',
-    alignItems: 'center',
+    gap: 8,
   },
-  contactAvatarText: { color: colors.brand.primary, fontSize: fontSizes.caption, fontWeight: '700' },
-  contactInfo: { flex: 1 },
-  contactName: { fontSize: fontSizes.caption, fontWeight: '600', color: colors.brand.textPrimary },
-  contactSub: { fontSize: fontSizes.small, color: colors.brand.textSecondary, marginTop: 2 },
-  addContactRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.gap8,
-    marginTop: spacing.gap12,
-    paddingTop: spacing.gap12,
-    borderTopWidth: 1,
-    borderTopColor: colors.brand.border,
-  },
-  addContactText: { color: colors.brand.primary, fontSize: fontSizes.caption, fontWeight: '600' },
+  alwaysOnPill: {},
+  modeActive: { borderWidth: 2, borderColor: '#14B8A6' },
+  modeGated: { backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' },
+  modeGatedText: { color: '#9CA3AF' },
+  alwaysOnText: { color: colors.white, fontSize: 11, fontWeight: '800' },
+  upgradeBadge: { backgroundColor: '#6B21A8', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 2 },
+  upgradeBadgeText: { fontSize: 8, fontWeight: '800', color: colors.white, letterSpacing: 0.3 },
+  tripModePill: {},
+  modeTripActive: { borderWidth: 2, borderColor: '#111827' },
+  tripModeText: { color: '#111827', fontSize: 11, fontWeight: '700' },
+  heroCtaPressed: { opacity: 0.85 },
 
-  // Tab bar (idle + active)
-  tabBar: {
-    flexDirection: 'row',
-    backgroundColor: colors.brand.bgCard,
-    borderTopWidth: 1,
-    borderTopColor: colors.brand.border,
-    paddingBottom: spacing.gap8,
-    paddingTop: spacing.gap8,
+  // Map
+  mapCard: { height: 358, overflow: 'hidden', backgroundColor: '#E5E7EB', marginBottom: 22 },
+  mapFullBleed: { marginHorizontal: -8 },
+  locationBadge: {
+    position: 'absolute', top: 14, left: 20, minWidth: 182,
+    backgroundColor: 'rgba(255,255,255,0.96)', borderRadius: 3,
+    paddingHorizontal: 12, paddingVertical: 9,
+    flexDirection: 'row', alignItems: 'center', gap: 9,
+    shadowColor: '#111827', shadowOpacity: 0.12, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 3,
   },
-  atTabBar: {
-    flexDirection: 'row',
-    backgroundColor: colors.brand.bgCard,
-    borderTopWidth: 1,
-    borderTopColor: colors.brand.border,
-    paddingTop: spacing.gap8,
+  locationBadgeIcon: { width: 22, height: 22, borderRadius: 11, backgroundColor: '#E8F7F1', alignItems: 'center', justifyContent: 'center' },
+  locationEyebrow: { fontSize: 8, color: '#6B7280', fontWeight: '800' },
+  locationText: { fontSize: 11, color: '#111827', fontWeight: '800', marginTop: 1, maxWidth: 142 },
+  mapControls: { position: 'absolute', right: 13, bottom: 15, alignItems: 'center', gap: 9 },
+  mapControlBtn: {
+    width: 42, height: 42, borderRadius: 21, backgroundColor: colors.white,
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#111827', shadowOpacity: 0.14, shadowRadius: 7, shadowOffset: { width: 0, height: 2 }, elevation: 3,
   },
+  sosFab: {
+    width: 55, height: 55, borderRadius: 28, backgroundColor: '#DC1F1F',
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#111827', shadowOpacity: 0.22, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 4,
+  },
+  sosStar: { color: colors.white, fontSize: 28, fontWeight: '900', lineHeight: 28 },
+  sosText: { color: colors.white, fontSize: 8, fontWeight: '800', marginTop: -1 },
 
-  // Shared tab items
+  // Dashboard sections
+  safetyCircleSection: { marginTop: 8 },
+  dashboardSection: { marginBottom: 11 },
+  dashboardSectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 7 },
+  dashboardSectionTitle: { fontSize: 14, color: '#111827', fontWeight: '800' },
+  dashboardSectionAction: { flexDirection: 'row', alignItems: 'center', gap: 2 },
+  dashboardSectionActionText: { fontSize: 12, color: '#6B21A8', fontWeight: '700' },
+  dashboardSectionBody: { gap: 10 },
+
+  // Circle
+  dashboardContactRow: {
+    minHeight: 58, borderRadius: 8, backgroundColor: colors.white, borderWidth: 1, borderColor: '#DDE1E7',
+    paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 14,
+  },
+  dashboardAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#111827', alignItems: 'center', justifyContent: 'center' },
+  dashboardAvatarText: { color: colors.white, fontSize: 11, fontWeight: '900' },
+  dashboardRowMid: { flex: 1 },
+  dashboardContactName: { color: '#111827', fontSize: 12, fontWeight: '900' },
+  dashboardContactMeta: { color: '#6B7280', fontSize: 9, fontWeight: '600', marginTop: 2 },
+  addCircleCard: {
+    minHeight: 58, borderRadius: 8, backgroundColor: colors.white, borderWidth: 1, borderColor: '#DDE1E7',
+    paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 14,
+  },
+  addCircleIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' },
+  familyAddIcon: { backgroundColor: '#6B21A8' },
+  addCircleTitle: { color: '#111827', fontSize: 12, fontWeight: '900' },
+  addCircleMeta: { color: '#9CA3AF', fontSize: 8, fontWeight: '600', marginTop: 2 },
+  emptySectionText: { fontSize: 12, color: '#9CA3AF', textAlign: 'center', paddingVertical: 8 },
+
+  // History
+  historyRow: {
+    minHeight: 43, borderRadius: 8, backgroundColor: colors.white, borderWidth: 1, borderColor: '#DDE1E7',
+    paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 14,
+  },
+  historyIcon: { width: 24, alignItems: 'center' },
+  historyTitle: { flex: 1, color: '#374151', fontSize: 12, fontWeight: '600' },
+  historyTime: { color: '#6B7280', fontSize: 9, fontWeight: '700' },
+  emptyHistoryCard: {
+    minHeight: 72, borderRadius: 8, backgroundColor: colors.white, borderWidth: 1, borderColor: '#DDE1E7',
+    alignItems: 'center', justifyContent: 'center', gap: 6,
+  },
+  emptyHistoryText: { fontSize: 13, color: '#D1D5DB', fontWeight: '600' },
+
+  // Family groups
+  familyCard: {
+    minHeight: 58, borderRadius: 8, backgroundColor: colors.white, borderWidth: 1, borderColor: '#DDE1E7',
+    paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 14,
+  },
+  familyIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#111827', alignItems: 'center', justifyContent: 'center' },
+  activeStatus: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  activeDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#10B981' },
+  activeStatusText: { color: '#059669', fontSize: 9, fontWeight: '800' },
+  upgradeCard: {
+    minHeight: 72, borderRadius: 8, backgroundColor: '#FAF5FF', borderWidth: 1, borderColor: '#E9D5FF',
+    paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 14,
+  },
+  upgradeLockIcon: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#F3E8FF', alignItems: 'center', justifyContent: 'center' },
+  upgradeCardTitle: { color: '#6B21A8', fontSize: 14, fontWeight: '900' },
+  upgradeCardMeta: { color: '#A855F7', fontSize: 11, fontWeight: '500', marginTop: 3 },
+
+  // Tab bar
+  tabBar: { flexDirection: 'row', backgroundColor: colors.white, borderTopWidth: 1, borderTopColor: '#E5E7EB', paddingBottom: spacing.gap8, paddingTop: 9 },
+  atTabBar: { flexDirection: 'row', backgroundColor: colors.brand.bgCard, borderTopWidth: 1, borderTopColor: colors.brand.border, paddingTop: spacing.gap8 },
   tabItem: { flex: 1, alignItems: 'center', gap: 3 },
-  tabActiveLine: {
-    width: 20,
-    height: 2,
-    backgroundColor: colors.brand.primary,
-    borderRadius: 2,
-    marginTop: -2,
-  },
-  tabActiveLineDark: {
-    backgroundColor: colors.brand.mid,
-  },
-  tabLabel: { fontSize: fontSizes.small, color: colors.brand.textSecondary },
-  tabLabelActive: { color: colors.brand.primary, fontWeight: '600' },
+  tabActiveLine: { width: 0, height: 0 },
+  tabActiveLineDark: { backgroundColor: colors.brand.mid },
+  tabLabel: { fontSize: 9, color: '#111827', fontWeight: '600' },
+  tabLabelActive: { color: '#6B21A8', fontWeight: '800' },
   tabLabelActiveDark: { color: colors.brand.mid, fontWeight: '600' },
   tabLabelInactiveDark: { color: 'rgba(255,255,255,0.35)' },
 });
 
-// ── Active trip styles (separate StyleSheet for clarity) ─────────────────────
+// ── Active trip styles ────────────────────────────────────────────────────────
 
 const atStyles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#F4F3EF',
-  },
-
-  // Dark green banner (normal state)
-  banner: {
-    backgroundColor: '#1A6B4A',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
+  root: { flex: 1, backgroundColor: '#F4F3EF' },
+  banner: { backgroundColor: '#1A6B4A', paddingHorizontal: 16, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   bannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  bannerDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#4ADE80',
-  },
-  bannerTxt: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: 'rgba(255,255,255,0.9)',
-  },
+  bannerDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#4ADE80' },
+  bannerTxt: { fontSize: 11, fontWeight: '600', color: 'rgba(255,255,255,0.9)' },
   bannerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  bannerTimer: {
-    fontSize: 11,
-    color: 'rgba(255,255,255,0.6)',
-    fontWeight: '500',
-  },
-  bgChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    borderRadius: 6,
-    paddingVertical: 3,
-    paddingHorizontal: 8,
-  },
-  bgChipTxt: {
-    fontSize: 10,
-    color: 'rgba(255,255,255,0.8)',
-    fontWeight: '500',
-  },
-
-  // Red banner (SOS state)
-  sosBanner: {
-    backgroundColor: '#C0392B',
-    paddingHorizontal: 16,
-    paddingVertical: 7,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-  },
-  sosBannerDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#FFFFFF',
-    flexShrink: 0,
-  },
-  sosBannerTxt: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#FFFFFF',
-    flex: 1,
-  },
-  sosBannerTime: {
-    fontSize: 11,
-    color: 'rgba(255,255,255,0.7)',
-  },
-
-  // Route header
-  routeHdr: {
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 17,
-    paddingTop: 11,
-    paddingBottom: 12,
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#EEECE6',
-  },
-  routeText: {
-    fontSize: 19,
-    fontWeight: '800',
-    color: '#1A1A1A',
-    letterSpacing: -0.5,
-    marginBottom: 2,
-  },
-  routeMeta: {
-    fontSize: 11,
-    color: '#9C9A92',
-  },
-
-  // Scroll
+  bannerTimer: { fontSize: 11, color: 'rgba(255,255,255,0.6)', fontWeight: '500' },
+  bgChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 6, paddingVertical: 3, paddingHorizontal: 8 },
+  bgChipTxt: { fontSize: 10, color: 'rgba(255,255,255,0.8)', fontWeight: '500' },
+  sosBanner: { backgroundColor: '#C0392B', paddingHorizontal: 16, paddingVertical: 7, flexDirection: 'row', alignItems: 'center', gap: 7 },
+  sosBannerDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#FFFFFF', flexShrink: 0 },
+  sosBannerTxt: { fontSize: 11, fontWeight: '700', color: '#FFFFFF', flex: 1 },
+  sosBannerTime: { fontSize: 11, color: 'rgba(255,255,255,0.7)' },
+  routeHdr: { backgroundColor: '#FFFFFF', paddingHorizontal: 17, paddingTop: 11, paddingBottom: 12, borderBottomWidth: 0.5, borderBottomColor: '#EEECE6' },
+  routeText: { fontSize: 19, fontWeight: '800', color: '#1A1A1A', letterSpacing: -0.5, marginBottom: 2 },
+  routeMeta: { fontSize: 11, color: '#9C9A92' },
   scroll: { flex: 1 },
-  scrollContent: {
-    paddingHorizontal: 13,
-    paddingTop: 11,
-    gap: 9,
-  },
-
-  // Stat row
-  statRow: {
-    flexDirection: 'row',
-    gap: 7,
-  },
-  statBox: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 5,
-    alignItems: 'center',
-    borderWidth: 0.5,
-    borderColor: '#EEECE6',
-  },
-  statVal: {
-    fontSize: 17,
-    fontWeight: '800',
-    color: '#1A1A1A',
-    letterSpacing: -0.5,
-  },
-  statKey: {
-    fontSize: 10,
-    color: '#9C9A92',
-    marginTop: 2,
-  },
-
-  // Card (reused for location, standby, alert details, notified)
-  card: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderWidth: 0.5,
-    borderColor: '#EEECE6',
-  },
-  cardLbl: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#9C9A92',
-    letterSpacing: 0.7,
-    textTransform: 'uppercase',
-    marginBottom: 9,
-  },
-
-  // Location card
-  locRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 4,
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#F4F3EF',
-  },
+  scrollContent: { paddingHorizontal: 13, paddingTop: 11, gap: 9 },
+  statRow: { flexDirection: 'row', gap: 7 },
+  statBox: { flex: 1, backgroundColor: '#FFFFFF', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 5, alignItems: 'center', borderWidth: 0.5, borderColor: '#EEECE6' },
+  statVal: { fontSize: 17, fontWeight: '800', color: '#1A1A1A', letterSpacing: -0.5 },
+  statKey: { fontSize: 10, color: '#9C9A92', marginTop: 2 },
+  card: { backgroundColor: '#FFFFFF', borderRadius: 14, paddingVertical: 12, paddingHorizontal: 14, borderWidth: 0.5, borderColor: '#EEECE6' },
+  cardLbl: { fontSize: 10, fontWeight: '700', color: '#9C9A92', letterSpacing: 0.7, textTransform: 'uppercase', marginBottom: 9 },
+  locRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4, borderBottomWidth: 0.5, borderBottomColor: '#F4F3EF' },
   locRowLast: { borderBottomWidth: 0 },
   locKey: { fontSize: 11, color: '#9C9A92' },
   locVal: { fontSize: 11, color: '#1A1A1A', fontWeight: '500' },
-  locWait: {
-    fontSize: 13,
-    color: '#B4B2A9',
-    fontStyle: 'italic',
-    marginBottom: 5,
-  },
+  locWait: { fontSize: 13, color: '#B4B2A9', fontStyle: 'italic', marginBottom: 5 },
   locNote: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 6 },
   locNoteTxt: { fontSize: 11, color: '#B4B2A9' },
-
-  // Alert details (SOS sent state)
-  alertRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 5,
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#F4F3EF',
-  },
+  alertRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 5, borderBottomWidth: 0.5, borderBottomColor: '#F4F3EF' },
   alertRowLast: { borderBottomWidth: 0 },
   alertKey: { fontSize: 11, color: '#9C9A92' },
   alertVal: { fontSize: 11, fontWeight: '600', color: '#1A1A1A' },
   alertValGreen: { color: '#1D9E75' },
-
-  // Notified row
-  nrRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    paddingVertical: 5,
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#F4F3EF',
-  },
+  nrRow: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 5, borderBottomWidth: 0.5, borderBottomColor: '#F4F3EF' },
   nrRowLast: { borderBottomWidth: 0 },
   nrName: { fontSize: 12, fontWeight: '500', color: '#1A1A1A', flex: 1 },
-  nrBadge: {
-    backgroundColor: '#EFF9F4',
-    borderRadius: 6,
-    paddingVertical: 2,
-    paddingHorizontal: 7,
-    borderWidth: 0.5,
-    borderColor: '#B8E8D0',
-  },
+  nrBadge: { backgroundColor: '#EFF9F4', borderRadius: 6, paddingVertical: 2, paddingHorizontal: 7, borderWidth: 0.5, borderColor: '#B8E8D0' },
   nrBadgeTxt: { fontSize: 10, color: '#0F6E56', fontWeight: '600' },
-
-  // Circle standby card
-  sbTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  },
+  sbTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   sbLeft: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   sbDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#1D9E75' },
   sbTitle: { fontSize: 13, fontWeight: '600', color: '#1A1A1A' },
-  sbPill: {
-    backgroundColor: '#EFF9F4',
-    borderRadius: 20,
-    paddingVertical: 3,
-    paddingHorizontal: 8,
-    borderWidth: 0.5,
-    borderColor: '#B8E8D0',
-  },
+  sbPill: { backgroundColor: '#EFF9F4', borderRadius: 20, paddingVertical: 3, paddingHorizontal: 8, borderWidth: 0.5, borderColor: '#B8E8D0' },
   sbPillTxt: { fontSize: 10, color: '#0F6E56', fontWeight: '600' },
   emptyCircleTxt: { fontSize: fontSizes.caption, color: colors.brand.primary, fontWeight: '600' },
-
-  // Contact item rows
-  ciRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    paddingVertical: 6,
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#F4F3EF',
-  },
+  ciRow: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 6, borderBottomWidth: 0.5, borderBottomColor: '#F4F3EF' },
   ciRowLast: { borderBottomWidth: 0, paddingBottom: 0 },
-  ciAv: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
-    flexShrink: 0,
-  },
+  ciAv: { width: 28, height: 28, borderRadius: 14, justifyContent: 'center', alignItems: 'center', flexShrink: 0 },
   ciAvTxt: { fontSize: 9, fontWeight: '700' },
   ciInfo: { flex: 1 },
   ciName: { fontSize: 12, fontWeight: '600', color: '#1A1A1A' },
   ciRel: { fontSize: 10, color: '#9C9A92' },
   ciStatus: { fontSize: 10, color: '#1D9E75', fontWeight: '500' },
-
-  // Overflow stacked avatars
-  overflowRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingTop: 7,
-    borderTopWidth: 0.5,
-    borderTopColor: '#F4F3EF',
-    marginTop: 2,
-  },
+  overflowRow: { flexDirection: 'row', alignItems: 'center', paddingTop: 7, borderTopWidth: 0.5, borderTopColor: '#F4F3EF', marginTop: 2 },
   stackedAvatars: { flexDirection: 'row' },
-  stackedAv: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    borderWidth: 1.5,
-    borderColor: '#FFFFFF',
-    marginRight: -5,
-    justifyContent: 'center',
-    alignItems: 'center',
-    flexShrink: 0,
-  },
+  stackedAv: { width: 22, height: 22, borderRadius: 11, borderWidth: 1.5, borderColor: '#FFFFFF', marginRight: -5, justifyContent: 'center', alignItems: 'center', flexShrink: 0 },
   stackedAvTxt: { fontSize: 8, fontWeight: '700' },
   moreLbl: { fontSize: 11, color: '#9C9A92', marginLeft: 12 },
   moreLblBold: { color: '#1A6B4A', fontWeight: '600' },
-
-  // SOS button
-  sosBtn: {
-    backgroundColor: '#C0392B',
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 15,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 13,
-  },
-  sosIconCircle: {
-    width: 38,
-    height: 38,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    borderRadius: 19,
-    justifyContent: 'center',
-    alignItems: 'center',
-    flexShrink: 0,
-  },
+  sosBtn: { backgroundColor: '#C0392B', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 15, flexDirection: 'row', alignItems: 'center', gap: 13 },
+  sosIconCircle: { width: 38, height: 38, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 19, justifyContent: 'center', alignItems: 'center', flexShrink: 0 },
   sosTextBlock: { flex: 1 },
   sosTitle: { fontSize: 14, fontWeight: '800', color: '#FFFFFF' },
   sosSub: { fontSize: 10, color: 'rgba(255,255,255,0.65)', marginTop: 2 },
-
-  // Cancel SOS button
-  cancelBtn: {
-    backgroundColor: '#FEF2F2',
-    borderRadius: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-    borderWidth: 0.5,
-    borderColor: '#F7C1C1',
-  },
+  cancelBtn: { backgroundColor: '#FEF2F2', borderRadius: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 0.5, borderColor: '#F7C1C1' },
   cancelTxt: { fontSize: 12, color: '#A32D2D', fontWeight: '600' },
-
-  // End trip button
-  endBtn: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-    borderWidth: 0.5,
-    borderColor: '#EEECE6',
-  },
+  endBtn: { backgroundColor: '#FFFFFF', borderRadius: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 0.5, borderColor: '#EEECE6' },
   endTxt: { fontSize: 12, color: '#9C9A92', fontWeight: '500' },
+});
+
+// ── Setup modal styles ────────────────────────────────────────────────────────
+
+const smStyles = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'flex-end' },
+  card: {
+    backgroundColor: colors.white,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 28,
+    paddingTop: 28,
+    alignItems: 'center',
+  },
+  iconCircle: {
+    width: 68, height: 68, borderRadius: 34,
+    backgroundColor: colors.brand.primary,
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: 20,
+  },
+  iconCircleAudio: { backgroundColor: '#7C3AED' },
+  iconCirclePin: { backgroundColor: '#1A6B4A' },
+  title: { fontSize: 20, fontWeight: '800', color: colors.brand.textPrimary, marginBottom: 10, textAlign: 'center' },
+  body: { fontSize: fontSizes.caption, color: colors.brand.textSecondary, textAlign: 'center', lineHeight: 20, marginBottom: 24 },
+  primaryBtn: {
+    width: '100%', backgroundColor: colors.brand.primary,
+    borderRadius: 12, paddingVertical: 15, alignItems: 'center', marginBottom: 10,
+  },
+  primaryBtnText: { fontSize: fontSizes.body, fontWeight: '700', color: colors.white },
+  skipBtn: { width: '100%', paddingVertical: 12, alignItems: 'center', marginBottom: 4 },
+  skipBtnText: { fontSize: fontSizes.caption, color: colors.brand.textSecondary, fontWeight: '600' },
+  pressed: { opacity: 0.8 },
+
+  // PIN
+  pinDots: { flexDirection: 'row', gap: 16, marginBottom: 12 },
+  pinDot: { width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: '#D1D5DB', backgroundColor: 'transparent' },
+  pinDotFilled: { backgroundColor: colors.brand.primary, borderColor: colors.brand.primary },
+  pinError: { fontSize: 12, color: colors.brand.sos, marginBottom: 8, textAlign: 'center' },
+  numpad: { width: '100%', gap: 8, marginBottom: 12 },
+  numpadRow: { flexDirection: 'row', gap: 8 },
+  numpadKey: { flex: 1, height: 60, borderRadius: 12, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' },
+  numpadKeyText: { fontSize: 22, fontWeight: '600', color: colors.brand.textPrimary },
+  numpadPressed: { backgroundColor: '#E5E7EB' },
 });
 
 export default HomeScreen;

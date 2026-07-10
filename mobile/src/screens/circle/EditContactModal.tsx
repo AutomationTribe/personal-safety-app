@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   KeyboardAvoidingView,
   Modal,
   Pressable,
@@ -20,7 +21,7 @@ import { colors, fontSizes, spacing } from '../../styles/tokens';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const RELATIONSHIPS = ['Sister', 'Brother', 'Mother', 'Father', 'Friend', 'Partner', 'Other'] as const;
+const RELATIONSHIPS = ['Family Member', 'Wife', 'Husband', 'Son', 'Daughter', 'Sister', 'Brother', 'Mother', 'Father', 'Friend', 'Partner', 'Other'] as const;
 type Relationship = typeof RELATIONSHIPS[number];
 
 const NIGERIAN_E164_RE = /^\+234[789]\d{9}$/;
@@ -43,7 +44,7 @@ function isValidNigerianPhone(phone: string): boolean {
 function toRelationship(value: string): Relationship | '' {
   return (RELATIONSHIPS as readonly string[]).includes(value)
     ? (value as Relationship)
-    : '';
+    : 'Family Member';
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -52,6 +53,9 @@ const EditContactModal = ({ visible, contact, onClose, onUpdated }: Props) => {
   const nameRef = useRef<TextInput>(null);
   const phoneRef = useRef<TextInput>(null);
   const emailRef = useRef<TextInput>(null);
+  const sheetY = useRef(new Animated.Value(420)).current;
+  const sheetOpacity = useRef(new Animated.Value(0)).current;
+  const saveScale = useRef(new Animated.Value(1)).current;
 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -72,8 +76,25 @@ const EditContactModal = ({ visible, contact, onClose, onUpdated }: Props) => {
       setErrors({});
       setSaveError('');
       setSaving(false);
+      sheetY.setValue(420);
+      sheetOpacity.setValue(0);
+      Animated.parallel([
+        Animated.spring(sheetY, {
+          toValue: 0,
+          useNativeDriver: true,
+          stiffness: 150,
+          damping: 22,
+          mass: 0.9,
+          overshootClamping: false,
+        }),
+        Animated.timing(sheetOpacity, {
+          toValue: 1,
+          duration: 180,
+          useNativeDriver: true,
+        }),
+      ]).start();
     }
-  }, [visible, contact]);
+  }, [visible, contact, sheetOpacity, sheetY]);
 
   // ── Validation ────────────────────────────────────────────────────────────
 
@@ -121,6 +142,15 @@ const EditContactModal = ({ visible, contact, onClose, onUpdated }: Props) => {
     onClose();
   };
 
+  const animateSave = (toValue: number) => {
+    Animated.spring(saveScale, {
+      toValue,
+      useNativeDriver: true,
+      speed: 30,
+      bounciness: 6,
+    }).start();
+  };
+
   // ── Derived UI state ──────────────────────────────────────────────────────
 
   const phoneFormatted = formatNigerianPhone(phone);
@@ -132,186 +162,176 @@ const EditContactModal = ({ visible, contact, onClose, onUpdated }: Props) => {
     <Modal
       visible={visible}
       transparent
-      animationType="slide"
+      animationType="none"
       onRequestClose={onClose}
       statusBarTranslucent
     >
-      <KeyboardAvoidingView
-        style={styles.overlay}
-        behavior="padding"
-      >
-          <Pressable style={styles.dismissArea} onPress={onClose} />
-          <View style={styles.sheet}>
-            {/* Handle */}
-            <View style={styles.handleRow}>
-              <View style={styles.handle} />
-            </View>
+      <KeyboardAvoidingView style={styles.overlay} behavior="padding">
+        <Pressable style={styles.dismissArea} onPress={onClose} />
+        <Animated.View style={[styles.sheet, { opacity: sheetOpacity, transform: [{ translateY: sheetY }] }]}>
+          <View style={styles.handleRow}>
+            <View style={styles.handle} />
+          </View>
 
-            {/* Header */}
-            <View style={styles.headerRow}>
-              <View style={styles.headerLeft}>
-                <Text style={styles.headerTitle}>Edit contact</Text>
-                <View style={styles.nameBadge}>
-                  <Text style={styles.nameBadgeText} numberOfLines={1}>
-                    {contact.name}
-                  </Text>
-                </View>
+          <View style={styles.headerRow}>
+            <View style={styles.headerLeft}>
+              <Text style={styles.headerTitle}>Edit contact</Text>
+              <View style={styles.nameBadge}>
+                <Text style={styles.nameBadgeText} numberOfLines={1}>
+                  {contact.name}
+                </Text>
               </View>
-              <Pressable
-                style={({ pressed }) => [styles.closeBtn, pressed && styles.closeBtnPressed]}
-                onPress={onClose}
-                hitSlop={8}
-              >
-                <Feather name="x" size={16} color={colors.brand.textSecondary} />
-              </Pressable>
             </View>
-
-            <View style={styles.divider} />
-
-            <ScrollView
-              style={styles.scroll}
-              contentContainerStyle={styles.scrollContent}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
+            <Pressable
+              style={({ pressed }) => [styles.closeBtn, pressed && styles.closeBtnPressed]}
+              onPress={onClose}
+              hitSlop={8}
             >
-              {/* ── Name ── */}
-              <View style={styles.fieldGroup}>
-                <Text style={styles.label}>
-                  Name <Text style={styles.required}>*</Text>
-                </Text>
-                <View
-                  style={[
-                    styles.inputWrapper,
-                    focusedField === 'name' && styles.inputFocused,
-                    errors.name ? styles.inputErrorBorder : null,
-                  ]}
-                >
-                  <TextInput
-                    ref={nameRef}
-                    style={styles.input}
-                    value={name}
-                    onChangeText={(t) => { setName(t); setErrors((e) => ({ ...e, name: undefined })); }}
-                    onFocus={() => setFocusedField('name')}
-                    onBlur={() => setFocusedField(null)}
-                    placeholder="Full name"
-                    placeholderTextColor="#C5C3BB"
-                    autoCapitalize="words"
-                    returnKeyType="next"
-                    onSubmitEditing={() => phoneRef.current?.focus()}
-                    editable={!saving}
-                  />
-                </View>
-                {errors.name ? <Text style={styles.errorText}>{errors.name}</Text> : null}
+              <Feather name="x" size={16} color="#4B5563" />
+            </Pressable>
+          </View>
+
+          <View style={styles.divider} />
+
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.fieldGroup}>
+              <Text style={styles.label}>
+                Name <Text style={styles.required}>*</Text>
+              </Text>
+              <View
+                style={[
+                  styles.inputWrapper,
+                  focusedField === 'name' && styles.inputFocused,
+                  errors.name ? styles.inputErrorBorder : null,
+                ]}
+              >
+                <TextInput
+                  ref={nameRef}
+                  style={styles.input}
+                  value={name}
+                  onChangeText={(t) => { setName(t); setErrors((e) => ({ ...e, name: undefined })); }}
+                  onFocus={() => setFocusedField('name')}
+                  onBlur={() => setFocusedField(null)}
+                  placeholder="Full name"
+                  placeholderTextColor="#9CA3AF"
+                  autoCapitalize="words"
+                  returnKeyType="next"
+                  onSubmitEditing={() => phoneRef.current?.focus()}
+                  editable={!saving}
+                />
               </View>
+              {errors.name ? <Text style={styles.errorText}>{errors.name}</Text> : null}
+            </View>
 
-              {/* ── Phone ── */}
-              <View style={styles.fieldGroup}>
-                <Text style={styles.label}>
-                  Phone <Text style={styles.required}>*</Text>
-                </Text>
-                <View
-                  style={[
-                    styles.inputWrapper,
-                    focusedField === 'phone' && styles.inputFocused,
-                    errors.phone ? styles.inputErrorBorder : null,
-                  ]}
-                >
-                  <TextInput
-                    ref={phoneRef}
-                    style={styles.input}
-                    value={phone}
-                    onChangeText={(t) => {
-                      setPhone(t);
-                      setErrors((e) => ({ ...e, phone: undefined }));
-                    }}
-                    onBlur={() => {
-                      setFocusedField(null);
-                      if (phone.trim()) setPhone(phoneFormatted);
-                    }}
-                    onFocus={() => setFocusedField('phone')}
-                    placeholder="08012345678 or +234…"
-                    placeholderTextColor="#C5C3BB"
-                    keyboardType="phone-pad"
-                    returnKeyType="next"
-                    onSubmitEditing={() => emailRef.current?.focus()}
-                    editable={!saving}
-                  />
-                  {phoneValid && (
-                    <View style={styles.validIcon}>
-                      <Feather name="check-circle" size={16} color={colors.brand.mid} />
-                    </View>
-                  )}
-                </View>
-                {errors.phone ? <Text style={styles.errorText}>{errors.phone}</Text> : null}
+            <View style={styles.fieldGroup}>
+              <Text style={styles.label}>
+                Phone <Text style={styles.required}>*</Text>
+              </Text>
+              <View
+                style={[
+                  styles.inputWrapper,
+                  focusedField === 'phone' && styles.inputFocused,
+                  errors.phone ? styles.inputErrorBorder : null,
+                ]}
+              >
+                <TextInput
+                  ref={phoneRef}
+                  style={styles.input}
+                  value={phone}
+                  onChangeText={(t) => {
+                    setPhone(t);
+                    setErrors((e) => ({ ...e, phone: undefined }));
+                  }}
+                  onBlur={() => {
+                    setFocusedField(null);
+                    if (phone.trim()) setPhone(phoneFormatted);
+                  }}
+                  onFocus={() => setFocusedField('phone')}
+                  placeholder="08012345678 or +234..."
+                  placeholderTextColor="#9CA3AF"
+                  keyboardType="phone-pad"
+                  returnKeyType="next"
+                  onSubmitEditing={() => emailRef.current?.focus()}
+                  editable={!saving}
+                />
+                {phoneValid && (
+                  <View style={styles.validIcon}>
+                    <Feather name="check-circle" size={16} color="#8491FF" />
+                  </View>
+                )}
               </View>
+              {errors.phone ? <Text style={styles.errorText}>{errors.phone}</Text> : null}
+            </View>
 
-              {/* ── Email ── */}
-              <View style={styles.fieldGroup}>
-                <Text style={styles.label}>
-                  Email <Text style={styles.optionalLabel}>(optional)</Text>
-                </Text>
-                <View
-                  style={[
-                    styles.inputWrapper,
-                    focusedField === 'email' && styles.inputFocused,
-                  ]}
-                >
-                  <TextInput
-                    ref={emailRef}
-                    style={styles.input}
-                    value={email}
-                    onChangeText={setEmail}
-                    onFocus={() => setFocusedField('email')}
-                    onBlur={() => setFocusedField(null)}
-                    placeholder="their@email.com"
-                    placeholderTextColor="#C5C3BB"
-                    keyboardType="email-address"
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    returnKeyType="done"
-                    editable={!saving}
-                  />
-                </View>
+            <View style={styles.fieldGroup}>
+              <Text style={styles.label}>
+                Email <Text style={styles.optionalLabel}>(optional)</Text>
+              </Text>
+              <View
+                style={[
+                  styles.inputWrapper,
+                  focusedField === 'email' && styles.inputFocused,
+                ]}
+              >
+                <TextInput
+                  ref={emailRef}
+                  style={styles.input}
+                  value={email}
+                  onChangeText={setEmail}
+                  onFocus={() => setFocusedField('email')}
+                  onBlur={() => setFocusedField(null)}
+                  placeholder="their@email.com"
+                  placeholderTextColor="#9CA3AF"
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="done"
+                  editable={!saving}
+                />
               </View>
+            </View>
 
-              {/* ── Relationship chips ── */}
-              <View style={styles.fieldGroup}>
-                <Text style={styles.label}>
-                  Relationship <Text style={styles.required}>*</Text>
-                </Text>
-                <View style={styles.chipsRow}>
-                  {RELATIONSHIPS.map((r) => {
-                    const active = relationship === r;
-                    return (
-                      <Pressable
-                        key={r}
-                        style={({ pressed }) => [
-                          styles.chip,
-                          active && styles.chipActive,
-                          pressed && !active && styles.chipPressed,
-                        ]}
-                        onPress={() => {
-                          setRelationship(r);
-                          setErrors((e) => ({ ...e, relationship: undefined }));
-                        }}
-                        disabled={saving}
-                      >
-                        <Text style={[styles.chipText, active && styles.chipTextActive]}>
-                          {r}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-                {errors.relationship ? (
-                  <Text style={styles.errorText}>{errors.relationship}</Text>
-                ) : null}
+            <View style={styles.fieldGroup}>
+              <Text style={styles.label}>
+                Relationship <Text style={styles.required}>*</Text>
+              </Text>
+              <View style={styles.chipsRow}>
+                {RELATIONSHIPS.map((r) => {
+                  const active = relationship === r;
+                  return (
+                    <Pressable
+                      key={r}
+                      style={({ pressed }) => [
+                        styles.chip,
+                        active && styles.chipActive,
+                        pressed && !active && styles.chipPressed,
+                      ]}
+                      onPress={() => {
+                        setRelationship(r);
+                        setErrors((e) => ({ ...e, relationship: undefined }));
+                      }}
+                      disabled={saving}
+                    >
+                      <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                        {r}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
               </View>
+              {errors.relationship ? (
+                <Text style={styles.errorText}>{errors.relationship}</Text>
+              ) : null}
+            </View>
 
-              {/* ── Save error ── */}
-              {saveError ? <Text style={styles.saveError}>{saveError}</Text> : null}
+            {saveError ? <Text style={styles.saveError}>{saveError}</Text> : null}
 
-              {/* ── Save button ── */}
+            <Animated.View style={{ transform: [{ scale: saveScale }] }}>
               <Pressable
                 style={({ pressed }) => [
                   styles.saveBtn,
@@ -319,6 +339,8 @@ const EditContactModal = ({ visible, contact, onClose, onUpdated }: Props) => {
                   pressed && !saving && styles.saveBtnPressed,
                 ]}
                 onPress={handleSave}
+                onPressIn={() => animateSave(0.97)}
+                onPressOut={() => animateSave(1)}
                 disabled={saving}
               >
                 {saving ? (
@@ -327,8 +349,9 @@ const EditContactModal = ({ visible, contact, onClose, onUpdated }: Props) => {
                   <Text style={styles.saveBtnText}>Save changes</Text>
                 )}
               </Pressable>
-            </ScrollView>
-          </View>
+            </Animated.View>
+          </ScrollView>
+        </Animated.View>
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -339,7 +362,7 @@ const EditContactModal = ({ visible, contact, onClose, onUpdated }: Props) => {
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: 'rgba(17,24,39,0.45)',
     justifyContent: 'flex-end',
   },
   dismissArea: {
@@ -362,7 +385,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 3,
     borderRadius: 2,
-    backgroundColor: 'rgba(0,0,0,0.1)',
+    backgroundColor: '#D7D9E8',
   },
 
   // Header
@@ -382,26 +405,26 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 17,
     fontWeight: '800',
-    color: colors.brand.textPrimary,
+    color: '#111827',
     letterSpacing: -0.2,
   },
   nameBadge: {
     alignSelf: 'flex-start',
-    backgroundColor: colors.brand.light,
+    backgroundColor: '#4B0082',
     borderRadius: 20,
     paddingHorizontal: spacing.gap12,
     paddingVertical: 4,
   },
   nameBadgeText: {
     fontSize: fontSizes.caption,
-    fontWeight: '600',
-    color: colors.brand.primary,
+    fontWeight: '700',
+    color: colors.white,
   },
   closeBtn: {
     width: 30,
     height: 30,
     borderRadius: 8,
-    backgroundColor: colors.brand.bgSurface,
+    backgroundColor: '#F1F3FD',
     justifyContent: 'center',
     alignItems: 'center',
     marginTop: 2,
@@ -409,7 +432,7 @@ const styles = StyleSheet.create({
   closeBtnPressed: { opacity: 0.65 },
   divider: {
     height: 0.5,
-    backgroundColor: 'rgba(0,0,0,0.08)',
+    backgroundColor: '#EEF0F5',
   },
 
   // Scroll body
@@ -422,41 +445,43 @@ const styles = StyleSheet.create({
   },
 
   // Fields
-  fieldGroup: { gap: 6 },
+  fieldGroup: {
+    gap: 7,
+  },
   label: {
     fontSize: fontSizes.caption,
-    fontWeight: '600',
-    color: colors.brand.textSecondary,
+    fontWeight: '700',
+    color: '#374151',
     letterSpacing: 0.2,
   },
-  required: { color: colors.brand.primary },
+  required: { color: '#6B008F' },
   optionalLabel: {
     fontSize: 11,
-    fontWeight: '400',
-    color: '#B0AFA8',
+    fontWeight: '500',
+    color: '#9CA3AF',
   },
   inputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: spacing.inputHeight,
-    borderWidth: 0.5,
-    borderColor: 'rgba(0,0,0,0.12)',
-    borderRadius: spacing.inputRadius,
-    paddingHorizontal: spacing.gap16,
-    backgroundColor: colors.white,
+    height: 48,
+    borderWidth: 1,
+    borderColor: '#D7D9E8',
+    borderRadius: 6,
+    paddingHorizontal: 17,
+    backgroundColor: '#F1F3FD',
   },
   inputFocused: {
-    borderColor: colors.brand.mid,
-    borderWidth: 1.5,
+    borderColor: '#8491FF',
+    backgroundColor: '#FFFFFF',
   },
   inputErrorBorder: {
     borderColor: colors.danger,
-    borderWidth: 1,
   },
   input: {
     flex: 1,
-    color: colors.brand.textPrimary,
-    fontSize: fontSizes.body,
+    color: '#111827',
+    fontSize: 14,
+    fontWeight: '500',
     height: '100%',
   },
   validIcon: { marginLeft: spacing.gap8 },
@@ -476,16 +501,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.gap12,
     paddingVertical: 8,
     borderRadius: 20,
-    backgroundColor: colors.brand.bgSurface,
+    backgroundColor: '#F1F3FD',
+    borderWidth: 1,
+    borderColor: '#D7D9E8',
   },
   chipActive: {
-    backgroundColor: colors.brand.primary,
+    backgroundColor: '#6B008F',
+    borderColor: '#6B008F',
   },
   chipPressed: { opacity: 0.7 },
   chipText: {
     fontSize: fontSizes.caption,
-    fontWeight: '600',
-    color: colors.brand.textSecondary,
+    fontWeight: '700',
+    color: '#4B5563',
   },
   chipTextActive: {
     color: colors.white,
@@ -498,18 +526,23 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   saveBtn: {
-    height: spacing.buttonHeight,
+    height: 56,
     borderRadius: 13,
-    backgroundColor: colors.brand.primary,
+    backgroundColor: '#6B008F',
     justifyContent: 'center',
     alignItems: 'center',
+    shadowColor: '#4C1D95',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.22,
+    shadowRadius: 16,
+    elevation: 6,
   },
   saveBtnDisabled: { opacity: 0.5 },
   saveBtnPressed: { opacity: 0.85 },
   saveBtnText: {
     color: colors.white,
     fontSize: fontSizes.button,
-    fontWeight: '700',
+    fontWeight: '800',
   },
 });
 

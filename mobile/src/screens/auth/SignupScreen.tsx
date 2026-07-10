@@ -16,6 +16,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { supabase } from '../../lib/supabase';
 import { signInWithGoogle } from '../../services/GoogleAuthService';
+
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
 import { colors } from '../../styles/tokens';
 import { AuthStackParamList } from '../../navigation/AppNavigator';
 
@@ -160,23 +162,36 @@ const SignupScreen = ({ navigation }: Props) => {
       setIsDuplicate(true);
       return;
     }
+
+    // Fire welcome SMS — non-blocking, never shown to user if it fails
+    const token = data.session?.access_token;
+    if (token && BACKEND_URL) {
+      fetch(`${BACKEND_URL}/api/v1/auth/welcome-sms`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch((err: unknown) => {
+        console.warn('[Signup] welcome SMS fire failed:', err instanceof Error ? err.message : err);
+      });
+    }
+
     // Auth state change in AppNavigator will detect the new session
     // and route to Subscription screen based on subscription_status = 'free'
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.root}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      <ScrollView
-        contentContainerStyle={[
-          styles.container,
-          { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 28 },
-        ]}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
+    <View style={styles.root}>
+      <KeyboardAvoidingView
+        style={styles.keyboardRoot}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
+        <ScrollView
+          contentContainerStyle={[
+            styles.container,
+            { paddingTop: insets.top + 8, paddingBottom: insets.bottom + 22 },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
         <View style={styles.hero}>
           <Image
             source={require('../../../assets/hadin-login-logo.png')}
@@ -326,66 +341,70 @@ const SignupScreen = ({ navigation }: Props) => {
           <Text style={styles.termsLink}>Privacy Policy</Text>
           {'. We use encryption to ensure your personal safety data remains private and secure.'}
         </Text>
-      </ScrollView>
-    </KeyboardAvoidingView>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F7F8FC',
+  },
+  keyboardRoot: {
+    flex: 1,
   },
   container: {
     flexGrow: 1,
-    justifyContent: 'center',
-    paddingHorizontal: 18,
+    justifyContent: 'flex-start',
+    paddingHorizontal: 4,
   },
   hero: {
     alignItems: 'center',
-    marginBottom: 24,
+    marginBottom: 22,
   },
   logoMark: {
-    width: 43,
-    height: 43,
-    marginBottom: 16,
+    width: 42,
+    height: 42,
+    marginBottom: 14,
   },
   heroTitle: {
-    color: '#0F172A',
-    fontSize: 26,
+    color: '#060B16',
+    fontSize: 21,
     fontWeight: '800',
-    marginBottom: 8,
+    marginBottom: 5,
   },
   heroSubtitle: {
-    color: '#64748B',
-    fontSize: 14,
+    color: '#374151',
+    fontSize: 12,
     textAlign: 'center',
   },
   card: {
     backgroundColor: '#fff',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
-    paddingHorizontal: 23,
-    paddingTop: 25,
-    paddingBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 16,
-    elevation: 4,
+    borderColor: '#DEE3EA',
+    paddingHorizontal: 16,
+    paddingTop: 15,
+    paddingBottom: 18,
+    shadowColor: '#111827',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.03,
+    shadowRadius: 10,
+    elevation: 1,
   },
   googleBtn: {
-    height: 42,
-    borderRadius: 8,
+    height: 31,
+    borderRadius: 5,
     borderWidth: 1,
-    borderColor: '#CBD5E1',
+    borderColor: '#D7DCE3',
     backgroundColor: '#fff',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 9,
-    marginBottom: 22,
+    gap: 8,
+    marginBottom: 17,
   },
   googleIcon: {
     width: 20,
@@ -394,12 +413,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   googleLogo: {
-    width: 18,
-    height: 18,
+    width: 14,
+    height: 14,
   },
   googleBtnText: {
-    color: '#0F172A',
-    fontSize: 12,
+    color: '#111827',
+    fontSize: 9,
     fontWeight: '700',
   },
   googleBtnDisabled: { opacity: 0.6 },
@@ -407,7 +426,7 @@ const styles = StyleSheet.create({
   dividerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 18,
+    marginBottom: 15,
   },
   dividerLine: {
     flex: 1,
@@ -415,27 +434,27 @@ const styles = StyleSheet.create({
     backgroundColor: '#D6DAE1',
   },
   dividerText: {
-    marginHorizontal: 13,
+    marginHorizontal: 12,
     color: '#6B7280',
-    fontSize: 10,
+    fontSize: 8,
     fontWeight: '600',
   },
   inputGroup: {
-    marginBottom: 13,
+    marginBottom: 11,
   },
   inputLabel: {
     fontSize: 10,
-    fontWeight: '700',
-    color: '#374151',
+    fontWeight: '800',
+    color: '#5B21B6',
     marginBottom: 5,
   },
   inputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: 43,
-    borderRadius: 7,
+    height: 31,
+    borderRadius: 5,
     paddingHorizontal: 12,
-    backgroundColor: '#EEF0F3',
+    backgroundColor: '#ECEEF1',
   },
   inputError: {
     borderColor: colors.danger,
@@ -453,8 +472,8 @@ const styles = StyleSheet.create({
     padding: 0,
   },
   eyeBtn: {
-    width: 34,
-    height: 34,
+    width: 28,
+    height: 28,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -464,25 +483,30 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   passwordHint: {
-    color: '#6B7280',
-    fontSize: 9,
-    marginTop: 6,
+    color: '#4B5563',
+    fontSize: 8,
+    marginTop: 4,
   },
   button: {
-    height: 49,
-    borderRadius: 7,
-    backgroundColor: '#155EEA',
+    height: 34,
+    borderRadius: 5,
+    backgroundColor: '#4B00B5',
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
     gap: 8,
-    marginTop: 17,
-    marginBottom: 24,
+    marginTop: 15,
+    marginBottom: 20,
+    shadowColor: '#4B00B5',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 5,
+    elevation: 3,
   },
   buttonPressed: { opacity: 0.85 },
   buttonText: {
     color: '#fff',
-    fontSize: 17,
+    fontSize: 13,
     fontWeight: '800',
   },
   serverErrorBox: {
@@ -512,21 +536,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   switchText: {
-    color: '#64748B',
-    fontSize: 14,
+    color: '#4B5563',
+    fontSize: 12,
   },
   switchLink: {
-    color: '#155EEA',
-    fontSize: 14,
+    color: '#5B21B6',
+    fontSize: 12,
     fontWeight: '700',
   },
   termsText: {
     textAlign: 'center',
-    fontSize: 9,
-    color: '#B6BDC8',
-    lineHeight: 14,
-    marginHorizontal: 26,
-    marginTop: 36,
+    fontSize: 8,
+    color: '#B5BBC5',
+    lineHeight: 12,
+    marginHorizontal: 22,
+    marginTop: 25,
   },
   termsLink: {
     color: '#8E96A3',
