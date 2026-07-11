@@ -2,9 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   BackHandler,
   Linking,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -395,7 +397,7 @@ const HomeScreen = () => {
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color={colors.brand.primary} />
+        <ActivityIndicator size="large" color="#4B0082" />
       </View>
     );
   }
@@ -650,7 +652,21 @@ const IdleView = ({
 
   // User mode toggle
   const [userMode, setUserMode] = useState<UserMode>('always_on');
+  const [modeToggleWidth, setModeToggleWidth] = useState(0);
+  const modeSlide = useRef(new Animated.Value(userMode === 'trip' ? 1 : 0)).current;
+  const modeDragStart = useRef(userMode === 'trip' ? 1 : 0);
   const alwaysOnSub = useRef<Location.LocationSubscription | null>(null);
+  const modeThumbWidth = modeToggleWidth > 0 ? (modeToggleWidth - 6) / 2 : 0;
+
+  const animateModeTo = useCallback((mode: UserMode) => {
+    Animated.spring(modeSlide, {
+      toValue: mode === 'trip' ? 1 : 0,
+      useNativeDriver: true,
+      damping: 20,
+      stiffness: 210,
+      mass: 0.8,
+    }).start();
+  }, [modeSlide]);
 
   useEffect(() => {
     AsyncStorage.getItem(USER_MODE_KEY)
@@ -659,8 +675,13 @@ const IdleView = ({
     return () => { alwaysOnSub.current?.remove(); };
   }, []);
 
+  useEffect(() => {
+    modeDragStart.current = userMode === 'trip' ? 1 : 0;
+    animateModeTo(userMode);
+  }, [animateModeTo, userMode]);
+
   const handleModeToggle = async (mode: UserMode) => {
-    if (mode === 'always_on' && userPlan === 'basic') return;
+    animateModeTo(mode);
     setUserMode(mode);
     await AsyncStorage.setItem(USER_MODE_KEY, mode).catch(() => null);
 
@@ -684,6 +705,35 @@ const IdleView = ({
       alwaysOnSub.current = null;
     }
   };
+
+  const modePanResponder = PanResponder.create({
+    onStartShouldSetPanResponder: () => false,
+    onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dx) > 6 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+    onMoveShouldSetPanResponderCapture: (_, gesture) => Math.abs(gesture.dx) > 6 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+    onPanResponderGrant: () => {
+      modeSlide.stopAnimation((value) => {
+        modeDragStart.current = typeof value === 'number' ? value : (userMode === 'trip' ? 1 : 0);
+      });
+    },
+    onPanResponderMove: (_, gesture) => {
+      if (!modeThumbWidth) return;
+      const nextValue = Math.max(0, Math.min(1, modeDragStart.current + (gesture.dx / modeThumbWidth)));
+      modeSlide.setValue(nextValue);
+    },
+    onPanResponderRelease: (_, gesture) => {
+      if (!modeThumbWidth) {
+        animateModeTo(userMode);
+        return;
+      }
+      const projectedValue = modeDragStart.current + (gesture.dx / modeThumbWidth) + (gesture.vx * 0.18);
+      const nextMode: UserMode = projectedValue >= 0.5 ? 'trip' : 'always_on';
+      void handleModeToggle(nextMode);
+      if (nextMode === userMode) animateModeTo(nextMode);
+    },
+    onPanResponderTerminate: () => {
+      animateModeTo(userMode);
+    },
+  });
 
   // Real GPS location for map
   const [mapRegion, setMapRegion] = useState(NIGERIA_DEFAULT);
@@ -718,21 +768,51 @@ const IdleView = ({
         showsVerticalScrollIndicator={false}
       >
         {/* Mode toggle */}
-        <View style={styles.modeRow}>
-          <Pressable
-            style={styles.modeSegmentActive}
+        <Pressable
+          style={styles.modeRow}
+          onLayout={(event) => setModeToggleWidth(event.nativeEvent.layout.width)}
+          onPress={(event) => {
+            const tapX = event.nativeEvent.locationX;
+            void handleModeToggle(tapX < modeToggleWidth / 2 ? 'always_on' : 'trip');
+          }}
+          {...modePanResponder.panHandlers}
+        >
+          {modeThumbWidth > 0 ? (
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.modeThumb,
+                {
+                  width: modeThumbWidth,
+                  transform: [{
+                    translateX: modeSlide.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, modeThumbWidth],
+                    }),
+                  }],
+                },
+              ]}
+            />
+          ) : null}
+          <View
+            pointerEvents="none"
+            style={styles.modeSegment}
           >
-            <Feather name="check-circle" size={15} color="#10B981" />
-            <Text style={styles.alwaysOnText}>Always On</Text>
-          </Pressable>
-          <Pressable
-            style={styles.modeSegmentInactive}
-            onPress={onStartTrip}
+            <Feather name="check-circle" size={15} color={userMode === 'always_on' ? colors.white : '#111827'} />
+            <Text style={[styles.modeText, userMode === 'always_on' ? styles.modeTextActive : styles.modeTextInactive]}>
+              Always On
+            </Text>
+          </View>
+          <View
+            pointerEvents="none"
+            style={styles.modeSegment}
           >
-            <MaterialCommunityIcons name="run" size={15} color="#111827" />
-            <Text style={styles.tripModeText}>Trip Mode</Text>
-          </Pressable>
-        </View>
+            <MaterialCommunityIcons name="run" size={15} color={userMode === 'trip' ? colors.white : '#111827'} />
+            <Text style={[styles.modeText, userMode === 'trip' ? styles.modeTextActive : styles.modeTextInactive]}>
+              Trip Mode
+            </Text>
+          </View>
+        </Pressable>
 
         {/* Map */}
         <View style={styles.mapFullBleed}>
@@ -740,10 +820,11 @@ const IdleView = ({
             <MapView
               style={StyleSheet.absoluteFill}
               region={mapRegion}
-              scrollEnabled={false}
-              zoomEnabled={false}
-              rotateEnabled={false}
+              scrollEnabled
+              zoomEnabled
+              zoomTapEnabled
               pitchEnabled={false}
+              rotateEnabled={false}
             >
               <Marker coordinate={{ latitude: mapRegion.latitude, longitude: mapRegion.longitude }} />
             </MapView>
@@ -1331,33 +1412,38 @@ const styles = StyleSheet.create({
     backgroundColor: '#E4E2E8',
     borderWidth: 1,
     borderColor: '#CFCAD6',
+    overflow: 'hidden',
+    position: 'relative',
   },
-  modeSegmentActive: {
-    flex: 1,
+  modeThumb: {
+    position: 'absolute',
+    top: 3,
+    bottom: 3,
+    left: 3,
     borderRadius: 5,
     backgroundColor: '#3B008F',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
     shadowColor: '#111827',
     shadowOpacity: 0.12,
     shadowRadius: 4,
     shadowOffset: { width: 0, height: 1 },
     elevation: 2,
   },
-  modeSegmentInactive: {
+  modeSegment: {
     flex: 1,
     borderRadius: 5,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
+    gap: 7,
+    zIndex: 1,
   },
   alwaysOnPill: {},
   modeActive: { borderWidth: 2, borderColor: '#14B8A6' },
   modeGated: { backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' },
   modeGatedText: { color: '#9CA3AF' },
+  modeText: { fontSize: 11, fontWeight: '800' },
+  modeTextActive: { color: colors.white },
+  modeTextInactive: { color: '#111827' },
   alwaysOnText: { color: colors.white, fontSize: 11, fontWeight: '800' },
   upgradeBadge: { backgroundColor: '#6B21A8', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 2 },
   upgradeBadgeText: { fontSize: 8, fontWeight: '800', color: colors.white, letterSpacing: 0.3 },
@@ -1454,8 +1540,8 @@ const styles = StyleSheet.create({
   upgradeCardMeta: { color: '#A855F7', fontSize: 11, fontWeight: '500', marginTop: 3 },
 
   // Tab bar
-  tabBar: { flexDirection: 'row', backgroundColor: colors.white, borderTopWidth: 1, borderTopColor: '#E5E7EB', paddingBottom: spacing.gap8, paddingTop: 9 },
-  atTabBar: { flexDirection: 'row', backgroundColor: colors.brand.bgCard, borderTopWidth: 1, borderTopColor: colors.brand.border, paddingTop: spacing.gap8 },
+  tabBar: { flexDirection: 'row', backgroundColor: '#E8EEFF', borderTopWidth: 1, borderTopColor: '#E5E7EB', paddingBottom: spacing.gap8, paddingTop: 9 },
+  atTabBar: { flexDirection: 'row', backgroundColor: '#E8EEFF', borderTopWidth: 1, borderTopColor: colors.brand.border, paddingTop: spacing.gap8 },
   tabItem: { flex: 1, alignItems: 'center', gap: 3 },
   tabActiveLine: { width: 0, height: 0 },
   tabActiveLineDark: { backgroundColor: colors.brand.mid },

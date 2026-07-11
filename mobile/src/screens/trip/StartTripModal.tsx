@@ -289,7 +289,7 @@ const StartTripModal = ({ visible, onClose, onTripStarted }: Props) => {
               <View style={styles.fieldGroup}>
                 <Text style={styles.label}>Alert contacts <Text style={styles.required}>*</Text></Text>
                 {loadingContacts ? (
-                  <ActivityIndicator color={colors.brand.primary} style={{ marginTop: 8 }} />
+                  <ActivityIndicator color="#4B0082" style={{ marginTop: 8 }} />
                 ) : contacts.length === 0 ? (
                   <View style={styles.emptyContacts}>
                     <Text style={styles.emptyContactsText}>

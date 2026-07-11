@@ -240,7 +240,7 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
                     if (phone.trim()) setPhone(phoneFormatted);
                   }}
                     onFocus={() => setFocusedField('phone')}
-                    placeholder="+1(555) 000-0000"
+                    placeholder="08012345678 or +234..."
                     placeholderTextColor="#8E95A3"
                     keyboardType="phone-pad"
                     returnKeyType="next"
@@ -347,6 +347,9 @@ const AddContactModal = ({ visible, onClose, onSaved }: Props) => {
                   )}
                 </Pressable>
               </Animated.View>
+              <Pressable style={styles.cancelBtn} onPress={onClose} disabled={saving}>
+                <Text style={styles.cancelText}>Cancel</Text>
+              </Pressable>
           </ScrollView>
         </Animated.View>
       </KeyboardAvoidingView>
@@ -537,6 +540,16 @@ const styles = StyleSheet.create({
     color: colors.white,
     fontSize: fontSizes.button,
     fontWeight: '800',
+  },
+  cancelBtn: {
+    alignSelf: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+  },
+  cancelText: {
+    color: '#6B008F',
+    fontSize: 13,
+    fontWeight: '700',
   },
 });
 

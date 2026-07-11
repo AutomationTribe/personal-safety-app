@@ -175,7 +175,7 @@ const CircleScreen = () => {
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator color={colors.brand.primary} />
+        <ActivityIndicator color="#4B0082" />
       </View>
     );
   }
@@ -1007,13 +1007,13 @@ const styles = StyleSheet.create({
   // ── Tab bar ──
   tabBar: {
     flexDirection: 'row',
-    backgroundColor: colors.white,
+    backgroundColor: '#E8EEFF',
     borderTopWidth: 1,
     borderTopColor: '#E5E7EB',
     paddingTop: 12,
   },
   listTabBar: {
-    backgroundColor: colors.white,
+    backgroundColor: '#E8EEFF',
     borderTopWidth: 1,
     borderTopColor: '#E5E7EB',
     paddingTop: 12,

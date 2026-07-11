@@ -281,7 +281,7 @@ const DirectPaymentScreen = ({ navigation, route }: Props) => {
               startInLoadingState
               renderLoading={() => (
                 <View style={styles.webViewLoading}>
-                  <ActivityIndicator size="large" color={colors.brand.primary} />
+                  <ActivityIndicator size="large" color="#4B0082" />
                   <Text style={styles.webViewLoadingText}>Loading Paystack…</Text>
                 </View>
               )}

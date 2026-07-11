@@ -109,7 +109,7 @@ const TripDetailScreen = () => {
   if (loading) {
     return (
       <View style={[styles.root, styles.centerWrap, { paddingTop: insets.top }]}>
-        <ActivityIndicator color={colors.brand.primary} size="large" />
+        <ActivityIndicator color="#4B0082" size="large" />
       </View>
     );
   }

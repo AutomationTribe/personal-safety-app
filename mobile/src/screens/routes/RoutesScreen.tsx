@@ -27,7 +27,7 @@ import SuccessToast from '../../components/SuccessToast';
 
 const H = {
   navy: '#241E46',
-  purple: '#6D28D9',
+  purple: '#4B0082',
   purpleLight: '#EDE9FE',
   blue: '#3B6FE0',
   blueLight: '#E8F0FE',
@@ -584,6 +584,7 @@ const RoutesScreen = () => {
   const [searchOpen, setSearchOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<Filter>('all');
   const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectMode, setSelectMode] = useState(false);
@@ -621,9 +622,11 @@ const RoutesScreen = () => {
   }, []);
 
   const loadAll = useCallback(async () => {
+    if (!hasLoadedOnce) setLoading(true);
     await Promise.all([loadTrips(), loadSOS()]);
+    setHasLoadedOnce(true);
     setLoading(false);
-  }, [loadTrips, loadSOS]);
+  }, [hasLoadedOnce, loadTrips, loadSOS]);
 
   const loadAllRef = useRef(loadAll);
   useEffect(() => { loadAllRef.current = loadAll; }, [loadAll]);
@@ -755,7 +758,11 @@ const RoutesScreen = () => {
     ? { icon: 'search' as const, title: `No results for "${query.trim()}"`, sub: undefined }
     : EMPTY_STATE[activeFilter];
 
-  const isFullyEmpty = !loading && trips.length === 0 && sosEvents.length === 0 && !query.trim();
+  const hasNoActivity = trips.length === 0 && sosEvents.length === 0 && !query.trim();
+  const isFullyEmpty = hasLoadedOnce && !loading && hasNoActivity;
+  const showFullEmptyState = isFullyEmpty && historyItems.length === 0;
+  const isInitialLoading = loading && !hasLoadedOnce;
+  const useQuietHistoryShell = isInitialLoading || isFullyEmpty;
 
   // ── Frequent destination + weekly overview (footer widgets) ──────────────────
 
@@ -787,23 +794,29 @@ const RoutesScreen = () => {
     <View style={rs.root}>
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <View style={[rs.header, { paddingTop: insets.top + 10 }]}>
+      <View style={[rs.header, useQuietHistoryShell && rs.emptyHeader, { paddingTop: insets.top + 10 }]}>
         <View style={rs.headerTop}>
           <Pressable style={rs.headerIconBtn} onPress={() => navigation.navigate('Home')} hitSlop={8}>
             <Feather name="arrow-left" size={20} color={H.ink} />
           </Pressable>
           <Text style={rs.headerTitle}>History</Text>
-          <Pressable
-            style={rs.headerIconBtn}
-            onPress={() => setSearchOpen((v) => !v)}
-            hitSlop={8}
-          >
-            <Feather name={searchOpen ? 'x' : 'search'} size={19} color={H.ink} />
-          </Pressable>
+          {useQuietHistoryShell ? (
+            <View style={rs.headerIconBtn} />
+          ) : (
+            <Pressable
+              style={rs.headerIconBtn}
+              onPress={() => setSearchOpen((v) => !v)}
+              hitSlop={8}
+            >
+              <Feather name={searchOpen ? 'x' : 'search'} size={19} color={H.ink} />
+            </Pressable>
+          )}
         </View>
-        <Text style={rs.headerSub}>Review your recent safety activity and travel logs.</Text>
+        {!useQuietHistoryShell && (
+          <Text style={rs.headerSub}>Review your recent safety activity and travel logs.</Text>
+        )}
 
-        {searchOpen && (
+        {!useQuietHistoryShell && searchOpen && (
           <View style={rs.searchRow}>
             <Feather name="search" size={15} color="#9C9A92" />
             <TextInput
@@ -825,44 +838,57 @@ const RoutesScreen = () => {
       </View>
 
       {/* ── Filter tabs (segmented pill) ──────────────────────────────────── */}
-      <View style={rs.filterWrap}>
-        <View style={rs.filterRow}>
-          {FILTER_TABS.map(({ key, label }) => (
-            <Pressable
-              key={key}
-              style={[rs.filterTab, activeFilter === key && rs.filterTabActive]}
-              onPress={() => setActiveFilter(key)}
-            >
-              <Text style={[rs.filterLabel, activeFilter === key && rs.filterLabelActive]}>
-                {label}
-              </Text>
-            </Pressable>
-          ))}
+      {!useQuietHistoryShell && (
+        <View style={rs.filterWrap}>
+          <View style={rs.filterRow}>
+            {FILTER_TABS.map(({ key, label }) => (
+              <Pressable
+                key={key}
+                style={[rs.filterTab, activeFilter === key && rs.filterTabActive]}
+                onPress={() => setActiveFilter(key)}
+              >
+                <Text style={[rs.filterLabel, activeFilter === key && rs.filterLabelActive]}>
+                  {label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
         </View>
-      </View>
+      )}
 
       {/* ── Content ────────────────────────────────────────────────────────── */}
-      {loading ? (
+      {isInitialLoading ? (
         <View style={rs.centerWrap}>
           <ActivityIndicator color={H.purple} size="large" />
         </View>
-      ) : isFullyEmpty ? (
+      ) : loading && !showFullEmptyState ? (
+        <View style={rs.centerWrap}>
+          <ActivityIndicator color={H.purple} size="large" />
+        </View>
+      ) : showFullEmptyState ? (
         <View style={rs.emptyScreen}>
-          <View style={rs.emptyIconLg}>
-            <Feather name="clock" size={30} color={H.purple} />
-          </View>
-          <Text style={rs.emptyTitleLg}>No Activity Yet</Text>
-          <Text style={rs.emptySubLg}>
-            Your trips and safety alerts will appear here once you start using Hadin features.
-            We'll keep a detailed log of your protected movements.
-          </Text>
+          <View style={rs.emptyCard}>
+            <View style={rs.emptyGraphic}>
+              <View style={rs.emptyClockCircle}>
+                <Feather name="clock" size={44} color="#3F5BD7" />
+              </View>
+              <View style={rs.emptyShieldBadge}>
+                <Feather name="shield" size={15} color="#3F5BD7" />
+              </View>
+            </View>
+            <Text style={rs.emptyTitleLg}>No Activity Yet</Text>
+            <Text style={rs.emptySubLg}>
+              Your trips and safety alerts will appear here once you start using Hadin features.
+              We'll keep a detailed log of your protected movements.
+            </Text>
 
-          <Pressable style={rs.startTripBtn} onPress={() => navigation.navigate('Home')}>
-            <Text style={rs.startTripBtnText}>Start a Trip</Text>
-          </Pressable>
-          <Pressable onPress={() => navigation.navigate('Home')}>
-            <Text style={rs.returnLink}>Return to Dashboard</Text>
-          </Pressable>
+            <Pressable style={rs.startTripBtn} onPress={() => navigation.navigate('Home')}>
+              <Text style={rs.startTripBtnText}>START A TRIP</Text>
+            </Pressable>
+            <Pressable onPress={() => navigation.navigate('Home')}>
+              <Text style={rs.returnLink}>Return to Dashboard</Text>
+            </Pressable>
+          </View>
 
           <View style={rs.infoChipsRow}>
             <View style={rs.infoChip}>
@@ -997,17 +1023,18 @@ export default RoutesScreen;
 const rs = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#F4F3EF',
+    backgroundColor: '#F8F8FF',
   },
 
   // Header
   header: {
-    backgroundColor: '#fff',
+    backgroundColor: '#F8F8FF',
     paddingHorizontal: 18,
     paddingBottom: 14,
-    borderBottomWidth: 0.5,
-    borderBottomColor: H.hairline,
+    borderBottomWidth: 1,
+    borderBottomColor: '#D8DAE2',
   },
+  emptyHeader: { paddingBottom: 15 },
   headerTop: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1020,10 +1047,9 @@ const rs = StyleSheet.create({
     alignItems: 'center',
   },
   headerTitle: {
-    fontSize: 19,
+    fontSize: 25,
     fontWeight: '800',
-    color: H.ink,
-    letterSpacing: -0.03 * 19,
+    color: '#111827',
   },
   headerSub: {
     fontSize: 12,
@@ -1386,73 +1412,110 @@ const rs = StyleSheet.create({
   emptyScreen: {
     flex: 1,
     alignItems: 'center',
-    paddingHorizontal: spacing.screenPadding,
-    paddingTop: 48,
+    paddingHorizontal: 26,
+    paddingTop: 76,
   },
-  emptyIconLg: {
-    width: 72,
-    height: 72,
-    borderRadius: 20,
-    backgroundColor: H.purpleLight,
-    justifyContent: 'center',
+  emptyCard: {
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#C9CBD6',
     alignItems: 'center',
-    marginBottom: 18,
+    paddingHorizontal: 24,
+    paddingTop: 22,
+    paddingBottom: 31,
+    marginBottom: 74,
+  },
+  emptyGraphic: {
+    width: 128,
+    height: 118,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  emptyClockCircle: {
+    width: 90,
+    height: 90,
+    borderRadius: 45,
+    backgroundColor: '#DCE5FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyShieldBadge: {
+    position: 'absolute',
+    right: 24,
+    bottom: 20,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#CBD0DF',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   emptyTitleLg: {
-    fontSize: 19,
+    fontSize: 26,
     fontWeight: '800',
-    color: H.ink,
-    marginBottom: 8,
+    color: '#111827',
+    marginBottom: 6,
   },
   emptySubLg: {
-    fontSize: 13,
-    color: H.sub,
+    fontSize: 16,
+    color: '#4B5563',
     textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 24,
+    lineHeight: 24,
+    marginBottom: 45,
   },
   startTripBtn: {
     alignSelf: 'stretch',
     backgroundColor: H.purple,
-    borderRadius: 14,
+    borderRadius: 0,
     paddingVertical: 15,
     alignItems: 'center',
-    marginBottom: 14,
+    marginBottom: 19,
+    shadowColor: '#111827',
+    shadowOpacity: 0.18,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
   startTripBtnText: {
     fontSize: 15,
     fontWeight: '700',
     color: '#fff',
+    letterSpacing: 1.2,
   },
   returnLink: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: H.purple,
-    marginBottom: 32,
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#3047D9',
   },
   infoChipsRow: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 22,
     alignSelf: 'stretch',
   },
   infoChip: {
     flex: 1,
-    backgroundColor: '#fff',
-    borderRadius: 14,
-    borderWidth: 0.5,
-    borderColor: H.hairline,
-    padding: 14,
-    gap: 6,
+    backgroundColor: 'transparent',
+    borderLeftWidth: 2,
+    borderLeftColor: '#DCE5FF',
+    paddingLeft: 13,
+    paddingTop: 12,
+    minHeight: 101,
+    gap: 7,
   },
   infoChipTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: H.ink,
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#111827',
   },
   infoChipSub: {
-    fontSize: 11,
-    color: H.sub,
-    lineHeight: 15,
+    fontSize: 12,
+    color: '#374151',
+    lineHeight: 16,
   },
 });
 
