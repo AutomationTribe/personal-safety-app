@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef } from 'react';
-import { Animated, StyleSheet, Text, View } from 'react-native';
+import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -70,21 +70,22 @@ const SuccessToast = ({ visible, title, subtitle, onHide, duration = 3000 }: Pro
 
   return (
     <Animated.View
-      pointerEvents="none"
+      pointerEvents={visible ? 'auto' : 'none'}
       style={[
         styles.container,
-        { top: insets.top + 12, transform: [{ translateY }], opacity },
+        { paddingTop: insets.top + 13, transform: [{ translateY }], opacity },
       ]}
     >
-      <View style={styles.iconCircle}>
-        <Feather name="check" size={18} color="#FFFFFF" />
-      </View>
+      <Feather name="check-circle" size={19} color="#FFFFFF" />
       <View style={styles.textBlock}>
         <Text style={styles.title} numberOfLines={1}>{title}</Text>
         {subtitle ? (
           <Text style={styles.subtitle} numberOfLines={2}>{subtitle}</Text>
         ) : null}
       </View>
+      <Pressable style={styles.closeBtn} onPress={exit} hitSlop={10}>
+        <Feather name="x" size={19} color="#FFFFFF" />
+      </Pressable>
     </Animated.View>
   );
 };
@@ -92,37 +93,24 @@ const SuccessToast = ({ visible, title, subtitle, onHide, duration = 3000 }: Pro
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    left: 14,
-    right: 14,
+    top: 0,
+    left: 0,
+    right: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#1A1A1A',
-    borderRadius: 14,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    gap: 12,
+    backgroundColor: '#16A34A',
+    paddingBottom: 16,
+    paddingHorizontal: 28,
+    gap: 13,
     zIndex: 9999,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.18,
-    shadowRadius: 12,
-    elevation: 8,
-  },
-  iconCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#1D9E75',
-    justifyContent: 'center',
-    alignItems: 'center',
-    flexShrink: 0,
+    elevation: 10,
   },
   textBlock: {
     flex: 1,
   },
   title: {
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: 14,
+    fontWeight: '800',
     color: '#FFFFFF',
   },
   subtitle: {
@@ -130,6 +118,14 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.55)',
     marginTop: 2,
     lineHeight: 15,
+  },
+  closeBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });
 

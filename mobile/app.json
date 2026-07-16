@@ -1,18 +1,24 @@
 {
   "expo": {
     "name": "Hadin",
-    "slug": "hadin-mobile",
+    "slug": "guardon-mobile",
     "version": "1.0.0",
+    "scheme": "hadin",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#0E1116"
-    },
     "android": {
-      "package": "app.hadin.mobile"
+      "package": "app.hadin.mobile",
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyB2IHvBEZB0-9ByiHyo_OaZ9ssPj8TvfQc"
+        }
+      },
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "extra": {
       "eas": {
@@ -21,6 +27,28 @@
     },
     "plugins": [
       "expo-sqlite",
+      "expo-notifications",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#0E1116"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Hadin needs your location to track trips and send your position during an SOS.",
+          "locationAlwaysAndWhenInUsePermission": "Hadin needs your location to track trips and send your position during an SOS."
+        }
+      ],
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Hadin needs microphone access to record audio evidence when you trigger an SOS alert."
+        }
+      ],
       [
         "@react-native-google-signin/google-signin",
         {

@@ -26,7 +26,7 @@ const PLAN_CONFIG = {
   elite: { label: 'Complete Peace of Mind', planName: 'Elite Plan', price: '₦35,000' },
 } as const;
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3001';
 console.log('[DirectPayment] BACKEND_URL:', BACKEND_URL);
 
 const PAYSTACK_CALLBACK_HOST = 'hadin.app';

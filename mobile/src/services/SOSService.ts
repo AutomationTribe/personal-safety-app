@@ -1,8 +1,30 @@
 import * as Location from 'expo-location';
+import * as Battery from 'expo-battery';
+import NetInfo from '@react-native-community/netinfo';
 import { Linking } from 'react-native';
+import * as SQLite from 'expo-sqlite';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../lib/supabase';
 import { checkIsOnline } from '../hooks/useNetworkStatus';
+
+// Best-effort device snapshot for the SOS detail screen — never blocks or
+// fails the trigger if either read fails.
+async function getDeviceSnapshot(): Promise<{ batteryLevel: number | null; networkType: string | null }> {
+  const [batteryLevel, networkType] = await Promise.all([
+    Battery.getBatteryLevelAsync()
+      .then((level) => (level >= 0 ? Math.round(level * 100) : null))
+      .catch(() => null),
+    NetInfo.fetch()
+      .then((state) => {
+        if (state.type === 'wifi') return 'Wi-Fi';
+        if (state.type === 'cellular') return state.details?.cellularGeneration?.toUpperCase() ?? 'Cellular';
+        if (state.isConnected) return state.type;
+        return 'Offline';
+      })
+      .catch(() => null),
+  ]);
+  return { batteryLevel, networkType };
+}
 
 export interface SOSResult {
   success: boolean;
@@ -10,6 +32,9 @@ export interface SOSResult {
   notified: number;
   total: number;
   error?: string;
+  // True when the device had no internet at trigger time — the mobile UI
+  // shows a distinct "No internet — SOS sent via SMS" banner for this case.
+  offline?: boolean;
 }
 
 export interface SOSContact {
@@ -52,29 +77,124 @@ async function openSMSFallback(phones: string[], lat: number, lng: number): Prom
   if (supported) await Linking.openURL(url);
 }
 
+// ── Offline SOS queue (SQLite) ───────────────────────────────────────────────
+// Written when SOS is triggered with no internet — the SMS composer fallback
+// (above) already reaches the circle immediately, but the backend event
+// (monitoring center record, contacts_notified, alert escalation) still
+// needs to sync once connectivity returns.
+
+let _sosDb: SQLite.SQLiteDatabase | null = null;
+
+async function getSosDb(): Promise<SQLite.SQLiteDatabase> {
+  if (_sosDb) return _sosDb;
+  _sosDb = await SQLite.openDatabaseAsync('hadin.db');
+  await _sosDb.execAsync(`
+    CREATE TABLE IF NOT EXISTS sos_queue (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      trip_id    TEXT NOT NULL,
+      lat        REAL NOT NULL,
+      lng        REAL NOT NULL,
+      timestamp  TEXT NOT NULL,
+      contact_ids TEXT NOT NULL
+    );
+  `);
+  return _sosDb;
+}
+
+async function queueOfflineSOS(tripId: string | null, lat: number, lng: number, timestamp: string, contactIds: string[]): Promise<void> {
+  try {
+    const db = await getSosDb();
+    // sos_queue.trip_id is TEXT NOT NULL — store '' for a trip-less SOS and
+    // translate back to null on sync, same convention as location_pings_queue.
+    await db.runAsync(
+      `INSERT INTO sos_queue (trip_id, lat, lng, timestamp, contact_ids) VALUES (?, ?, ?, ?, ?)`,
+      [tripId ?? '', lat, lng, timestamp, JSON.stringify(contactIds)],
+    );
+  } catch (err) {
+    console.warn('[SOS] Failed to queue offline event:', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
+ * Sync any SQLite-queued offline SOS events to the backend. Call this when
+ * connectivity is restored (e.g. from a `useNetworkStatus` transition to
+ * online). Each row is POSTed exactly like a live trigger; successfully
+ * synced rows are deleted, failures are left queued for the next attempt.
+ * Never throws.
+ */
+export async function syncQueuedSOS(): Promise<{ synced: number; failed: number }> {
+  let synced = 0;
+  let failed = 0;
+
+  try {
+    const online = await checkIsOnline();
+    if (!online) return { synced, failed };
+
+    const db = await getSosDb();
+    const rows = await db.getAllAsync<{
+      id: number; trip_id: string; lat: number; lng: number; timestamp: string; contact_ids: string;
+    }>(`SELECT * FROM sos_queue ORDER BY id ASC`);
+
+    if (rows.length === 0) return { synced, failed };
+
+    const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
+    const token = sessionData.session?.access_token;
+    if (!token) return { synced, failed: rows.length };
+
+    for (const row of rows) {
+      try {
+        const response = await fetch(`${BACKEND_URL}/api/v1/sos`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ tripId: row.trip_id.length > 0 ? row.trip_id : null, lat: row.lat, lng: row.lng, timestamp: row.timestamp }),
+        });
+        if (response.ok) {
+          await db.runAsync(`DELETE FROM sos_queue WHERE id = ?`, [row.id]);
+          synced++;
+        } else {
+          failed++;
+        }
+      } catch {
+        failed++;
+      }
+    }
+  } catch (err) {
+    console.warn('[SOS] Queue sync error:', err instanceof Error ? err.message : String(err));
+  }
+
+  console.log(`[SOS] Queue sync: ${synced} synced, ${failed} failed`);
+  return { synced, failed };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
  * Fetch contacts for a trip from Supabase and cache them for offline SMS fallback.
- * Returns contacts that have notify_on_sos = true.
+ * Returns contacts that have notify_on_sos = true. Pass null for a trip-less
+ * (idle dashboard) SOS — falls back to every circle contact opted into SOS
+ * alerts, matching the backend's same fallback (backend/src/routes/sos.ts).
  */
-export async function getSOSContacts(tripId: string): Promise<SOSContact[]> {
-  const { data: trip, error: tripError } = await supabase
-    .from('trips')
-    .select('contact_ids')
-    .eq('id', tripId)
-    .single();
+export async function getSOSContacts(tripId: string | null): Promise<SOSContact[]> {
+  let contactIds: string[] | null = null;
 
-  if (tripError || !trip) return [];
+  if (tripId) {
+    const { data: trip, error: tripError } = await supabase
+      .from('trips')
+      .select('contact_ids')
+      .eq('id', tripId)
+      .single();
 
-  const contactIds = (trip as { contact_ids: string[] }).contact_ids ?? [];
-  if (contactIds.length === 0) return [];
+    if (tripError || !trip) return [];
+    contactIds = (trip as { contact_ids: string[] }).contact_ids ?? [];
+    if (contactIds.length === 0) return [];
+  }
 
-  const { data: rows, error: contactError } = await supabase
-    .from('trusted_contacts')
-    .select('id, name, phone')
-    .in('id', contactIds)
-    .eq('notify_on_sos', true);
+  // `.in()` (when present) must precede the terminal `.eq()` — matches the
+  // existing trip-scoped query's chain order.
+  const base = supabase.from('trusted_contacts').select('id, name, phone');
+  const { data: rows, error: contactError } = contactIds
+    ? await base.in('id', contactIds).eq('notify_on_sos', true)
+    : await base.eq('notify_on_sos', true);
 
   if (contactError || !rows) return [];
 
@@ -94,7 +214,7 @@ export async function getSOSContacts(tripId: string): Promise<SOSContact[]> {
  * Never throws — always returns SOSResult.
  */
 export async function triggerSOS(
-  tripId: string,
+  tripId: string | null,
   contactIds: string[],
 ): Promise<SOSResult> {
   // 1. GPS at Accuracy.High — non-negotiable for SOS
@@ -127,17 +247,20 @@ export async function triggerSOS(
   const token = sessionData.session?.access_token;
 
   // 3. Internet path
+  let wasOffline = false;
   try {
     const online = await checkIsOnline();
+    wasOffline = !online;
 
     if (online && token) {
+      const { batteryLevel, networkType } = await getDeviceSnapshot();
       const response = await fetch(`${BACKEND_URL}/api/v1/sos`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ tripId, lat, lng, timestamp: new Date().toISOString() }),
+        body: JSON.stringify({ tripId, lat, lng, timestamp: new Date().toISOString(), batteryLevel, networkType }),
       });
 
       if (response.ok) {
@@ -158,6 +281,12 @@ export async function triggerSOS(
     console.warn('[SOS] Backend unreachable — SMS fallback:', err instanceof Error ? err.message : String(err));
   }
 
+  // 3b. No internet at all — queue the event to sync once connectivity
+  // returns, on top of the immediate SMS fallback below.
+  if (wasOffline) {
+    await queueOfflineSOS(tripId, lat, lng, new Date().toISOString(), contactIds);
+  }
+
   // 4. SMS fallback — use cache, try a fresh fetch if cache is empty
   let fallbackContacts = await readContactCache();
   if (fallbackContacts.length === 0) {
@@ -176,7 +305,60 @@ export async function triggerSOS(
     success: false,
     notified: 0,
     total: Math.max(contactIds.length, phones.length),
+    offline: wasOffline,
   };
+}
+
+/**
+ * Fire a silent, 2nd-level "are you okay?" escalation — monitoring center
+ * only, deliberately NEVER falls back to the native SMS composer (that
+ * would text the user's personal circle, which is exactly what this tier
+ * exists to avoid). If the backend is unreachable, the check-in is simply
+ * dropped rather than escalated some other way. Never throws.
+ */
+export async function triggerSilentSOS(tripId: string): Promise<{ success: boolean }> {
+  let lat: number;
+  let lng: number;
+
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') return { success: false };
+    const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+    lat = position.coords.latitude;
+    lng = position.coords.longitude;
+  } catch {
+    return { success: false };
+  }
+
+  const { data: sessionData } = await supabase.auth.getSession().catch(() => ({
+    data: { session: null },
+  }));
+  const token = sessionData.session?.access_token;
+  if (!token) return { success: false };
+
+  try {
+    const online = await checkIsOnline();
+    if (!online) return { success: false };
+
+    const response = await fetch(`${BACKEND_URL}/api/v1/sos`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ tripId, lat, lng, timestamp: new Date().toISOString(), alertLevel: 2 }),
+    });
+
+    if (response.ok) {
+      console.log('[SOS] Silent (level-2) check-in sent');
+      return { success: true };
+    }
+    console.warn(`[SOS] Silent check-in failed — backend returned ${response.status}`);
+    return { success: false };
+  } catch (err) {
+    console.warn('[SOS] Silent check-in unreachable:', err instanceof Error ? err.message : String(err));
+    return { success: false };
+  }
 }
 
 /**

@@ -17,7 +17,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { supabase } from '../../lib/supabase';
 import { signInWithGoogle } from '../../services/GoogleAuthService';
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3001';
 import { colors } from '../../styles/tokens';
 import { AuthStackParamList } from '../../navigation/AppNavigator';
 

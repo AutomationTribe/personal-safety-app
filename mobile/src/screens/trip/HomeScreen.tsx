@@ -20,13 +20,27 @@ import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
+import { Audio } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppStackParamList } from '../../navigation/AppNavigator';
 import { supabase } from '../../lib/supabase';
 import { useNetworkStatus } from '../../hooks/useNetworkStatus';
-import { stopTracking, getLastPing, LocationPing } from '../../services/LocationService';
-import { triggerSOS, cancelSOS, SOSContact } from '../../services/SOSService';
+import {
+  stopTracking,
+  startTracking,
+  detachTrip,
+  setPositionListener,
+  getLastPing,
+  haversineMetres,
+  getAccurateFix,
+  isAccurateEnough,
+  LocationPing,
+} from '../../services/LocationService';
+import { triggerSOS, triggerSilentSOS, cancelSOS, syncQueuedSOS, SOSContact } from '../../services/SOSService';
+import { startSOSRecording, stopSOSRecording } from '../../services/SOSAudioService';
 import { getContacts } from '../../services/CircleService';
+import { startBatteryMonitor, stopBatteryMonitor } from '../../services/BatteryMonitor';
+import { notifyTrackingPaused } from '../../services/NotificationService';
 import { colors, fontSizes, spacing } from '../../styles/tokens';
 import StartTripModal, { Trip } from './StartTripModal';
 import SuccessToast from '../../components/SuccessToast';
@@ -38,6 +52,15 @@ const SETUP_GPS_KEY = 'HADIN_SETUP_GPS';
 const SETUP_AUDIO_KEY = 'HADIN_SETUP_AUDIO';
 const SOS_PIN_KEY = 'HADIN_SOS_PIN';
 const USER_MODE_KEY = 'HADIN_USER_MODE';
+
+// Detector thresholds (Trip Mode stop/arrival detection — see flows/mobile/user-mode.md)
+const STOP_RADIUS_METRES = 50;
+const ARRIVAL_RADIUS_METRES = 50;
+const ARRIVAL_DEBOUNCE_MS = 30_000;
+const AREYOUOKAY_TIMEOUT_MS = 60_000;
+const ARRIVAL_AUTO_END_MS = 5 * 60_000;
+const ALWAYS_ONLINE_INTERVAL_MINUTES = 1;
+const TRIP_INTERVAL_MINUTES = 30;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -80,6 +103,18 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' });
 }
 
+// Prefer a street-level line (number + street, or a named place) over just
+// city/region — reverseGeocodeAsync returns both, but city/region alone
+// reads as a vague area even when the underlying GPS fix is accurate.
+function streetLevelLabel(addr: Location.LocationGeocodedAddress): string {
+  const streetLine = [addr.streetNumber, addr.street].filter(Boolean).join(' ');
+  const line1 = streetLine || addr.name || null;
+  const line2 = addr.city ?? addr.subregion ?? addr.region ?? null;
+  // Dedupe in case `name` and `city` resolve to the same string.
+  const parts = [...new Set([line1, line2].filter((p): p is string => !!p))];
+  return parts.join(', ') || 'Current location';
+}
+
 const AVATAR_PALETTE = [
   { bg: '#E6F1FB', fg: '#0C447C' },
   { bg: '#EAF3DE', fg: '#27500A' },
@@ -100,12 +135,19 @@ const NIGERIA_DEFAULT = {
   longitudeDelta: 0.05,
 };
 
+const SOS_COUNTDOWN_SECONDS = 20;
+
+function coordsFromPing(ping: LocationPing): string {
+  return `${Math.abs(ping.lat).toFixed(4)}° ${ping.lat >= 0 ? 'N' : 'S'}, ${Math.abs(ping.lng).toFixed(4)}° ${ping.lng >= 0 ? 'E' : 'W'}`;
+}
+
 // ── HomeScreen ────────────────────────────────────────────────────────────────
 
 const HomeScreen = () => {
   const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
   const { isOnline } = useNetworkStatus();
 
+  const [userId, setUserId] = useState('');
   const [userName, setUserName] = useState('');
   const [userPlan, setUserPlan] = useState<UserPlan>('basic');
   const [activeTrip, setActiveTrip] = useState<Trip | null>(null);
@@ -127,6 +169,10 @@ const HomeScreen = () => {
   const [sosTotal, setSosTotal] = useState(0);
   const [tripContacts, setTripContacts] = useState<CircleContact[]>([]);
   const [showEndModal, setShowEndModal] = useState(false);
+  const [showSOSCountdown, setShowSOSCountdown] = useState(false);
+  const [showSOSCancelPin, setShowSOSCancelPin] = useState(false);
+  const [cancelPinInput, setCancelPinInput] = useState('');
+  const [cancelPinError, setCancelPinError] = useState('');
 
   // Setup checklist state
   const [setupStep, setSetupStep] = useState<SetupStep | null>(null);
@@ -142,23 +188,45 @@ const HomeScreen = () => {
       const { data: { user } } = await supabase.auth.getUser();
       const userId = user?.id ?? '';
 
-      const [activeTripRes, recentRes, contactsRes, tripContactsRes, profileRes] = await Promise.all([
+      const [activeTripRes, recentRes, contactsRes, tripContactsRes, profileRes, activeSosRes] = await Promise.all([
         supabase.from('trips').select('*').eq('status', 'active').order('created_at', { ascending: false }).limit(1).maybeSingle(),
         supabase.from('trips').select('*').neq('status', 'active').order('created_at', { ascending: false }).limit(3),
         supabase.from('trusted_contacts').select('id, name, phone, relationship').order('created_at', { ascending: true }).limit(2),
         supabase.from('trusted_contacts').select('id, name, phone, relationship').order('created_at', { ascending: true }),
         supabase.from('profiles').select('plan, subscription_status').eq('id', userId).maybeSingle(),
+        supabase.from('sos_events').select('id, triggered_at, contacts_total, contacts_notified')
+          .eq('user_id', userId).is('cancelled_at', null).is('resolved_at', null)
+          .order('triggered_at', { ascending: false }).limit(1).maybeSingle(),
       ]);
 
       const meta = user?.user_metadata as { full_name?: string } | undefined;
+      setUserId(userId);
       setUserName(meta?.full_name ?? user?.email ?? '');
       setActiveTrip((activeTripRes.data as Trip | null) ?? null);
       setRecentTrips((recentRes.data as Trip[]) ?? []);
       setContacts((contactsRes.data as Contact[]) ?? []);
       setTripContacts((tripContactsRes.data ?? []) as CircleContact[]);
 
-      const profileData = profileRes.data as { plan?: string } | null;
-      const plan: UserPlan = profileData?.plan === 'elite' ? 'elite' : 'basic';
+      // Restore an SOS that's still active (not cancelled/resolved) — e.g.
+      // the app was killed and reopened while help is still on the way.
+      const activeSos = activeSosRes.data as {
+        id: string; triggered_at: string; contacts_total: number; contacts_notified: number;
+      } | null;
+      if (activeSos) {
+        setSosActive(true);
+        setSosEventId(activeSos.id);
+        setSosTime(formatTime(activeSos.triggered_at));
+        setSosNotified(activeSos.contacts_notified);
+        setSosTotal(activeSos.contacts_total);
+        void startSOSRecording(activeSos.id);
+      }
+
+      const profileData = profileRes.data as { plan?: string; subscription_status?: string } | null;
+      // Trial is treated as Elite-equivalent for Always Online gating (flows/mobile/dashboard.md).
+      const plan: UserPlan =
+        profileData?.plan === 'elite' || profileData?.subscription_status === 'trial'
+          ? 'elite'
+          : 'basic';
       setUserPlan(plan);
 
       // Fetch family groups for elite users (silent failure if table missing)
@@ -195,6 +263,15 @@ const HomeScreen = () => {
       .then(({ status }) => setLocationGranted(status === 'granted'))
       .catch(() => null);
   }, []);
+
+  // Sync any SQLite-queued offline SOS events as soon as connectivity returns.
+  const wasOnlineRef = useRef(isOnline);
+  useEffect(() => {
+    if (isOnline && !wasOnlineRef.current) {
+      void syncQueuedSOS();
+    }
+    wasOnlineRef.current = isOnline;
+  }, [isOnline]);
 
   // Realtime: watch trips table for status changes
   useEffect(() => {
@@ -242,15 +319,13 @@ const HomeScreen = () => {
     }
   }, [loading, checkSetupSteps]);
 
-  // Reset SOS state when no active trip
+  // tripContacts is trip-specific — clear it once the trip ends. SOS state
+  // is intentionally NOT reset here: SOS can be active with no trip at all
+  // (idle-dashboard trigger), and a trip ending must never silently hide an
+  // still-active SOS — only an explicit cancel/resolve does that.
   useEffect(() => {
     if (!activeTrip) {
       setTripContacts([]);
-      setSosActive(false);
-      setSosEventId(undefined);
-      setSosTime(undefined);
-      setSosNotified(0);
-      setSosTotal(0);
     }
   }, [activeTrip]);
 
@@ -268,7 +343,11 @@ const HomeScreen = () => {
   };
 
   const handleAudioEnable = async () => {
-    await Linking.openSettings().catch(() => null);
+    const { status } = await Audio.requestPermissionsAsync().catch(() => ({ status: 'denied' as const }));
+    if (status !== 'granted') {
+      // Already denied once (or restricted) — only Settings can grant it now.
+      await Linking.openSettings().catch(() => null);
+    }
     await AsyncStorage.setItem(SETUP_AUDIO_KEY, 'done').catch(() => null);
     await checkSetupSteps();
   };
@@ -330,7 +409,11 @@ const HomeScreen = () => {
 
   const handleTripStarted = (trip: Trip) => {
     setActiveTrip(trip);
-    setToast({ visible: true, title: 'Trip started' });
+    setToast({ visible: true, title: 'Trip successfully added' });
+  };
+
+  const handleIdleSOS = () => {
+    setShowSOSCountdown(true);
   };
 
   const handleEndTrip = () => {
@@ -341,25 +424,190 @@ const HomeScreen = () => {
   const confirmEndTrip = async () => {
     if (!activeTrip) return;
     setShowEndModal(false);
+    setShowArrival(false);
+    const endedTrip = activeTrip;
+    const endedAt = new Date().toISOString();
     try {
-      await supabase.from('trips').update({ status: 'completed', ended_at: new Date().toISOString() }).eq('id', activeTrip.id);
-      await stopTracking();
+      await supabase.from('trips').update({ status: 'completed', ended_at: endedAt }).eq('id', endedTrip.id);
+
+      // If Always Online is still selected (and the plan still allows it),
+      // keep that tracking session running — just untag this trip from it
+      // instead of stopping tracking outright.
+      const savedMode = userId
+        ? await AsyncStorage.getItem(`${USER_MODE_KEY}:${userId}`).catch(() => null)
+        : null;
+      if (savedMode === 'always_on' && userPlan !== 'basic') {
+        detachTrip();
+      } else {
+        await stopTracking();
+      }
+
       setActiveTrip(null);
       setSosActive(false);
       setSosEventId(undefined);
+      setTripSummary({ ...endedTrip, ended_at: endedAt, status: 'completed' });
       await loadData();
     } catch {
       Alert.alert('Error', 'Could not end trip');
     }
   };
 
+  // ── Stop-too-long / arrival detection (Trip Mode only) ──────────────────────
+  // Separate, lightweight foreground watcher purely for these two UX
+  // detectors — deliberately NOT the battery-optimized 30-min ping cadence
+  // LocationService already owns (see flows/mobile/user-mode.md). Stops the
+  // instant the trip ends.
+
+  const [showAreYouOkay, setShowAreYouOkay] = useState(false);
+  const [showArrival, setShowArrival] = useState(false);
+  const [tripSummary, setTripSummary] = useState<Trip | null>(null);
+
+  const stopAnchorRef = useRef<{ lat: number; lng: number } | null>(null);
+  const lastMovedAtRef = useRef<number>(Date.now());
+  const arrivedSinceRef = useRef<number | null>(null);
+  const detectorSubRef = useRef<Location.LocationSubscription | null>(null);
+  const areYouOkayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const arrivalAutoEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sosActiveRef = useRef(false);
+
+  useEffect(() => { sosActiveRef.current = sosActive; }, [sosActive]);
+
+  useEffect(() => {
+    if (!activeTrip) return;
+
+    stopAnchorRef.current = null;
+    lastMovedAtRef.current = Date.now();
+    arrivedSinceRef.current = null;
+    setShowAreYouOkay(false);
+    setShowArrival(false);
+
+    const thresholdMs = Math.max(1, activeTrip.max_stop_duration_minutes) * 60_000;
+    const destLat = activeTrip.destination_lat;
+    const destLng = activeTrip.destination_lng;
+
+    Location.getForegroundPermissionsAsync().then(({ status }) => {
+      if (status !== 'granted') return;
+      Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 5000, distanceInterval: 10 },
+        (pos) => {
+          if (sosActiveRef.current) return;
+          const { latitude, longitude } = pos.coords;
+          const now = Date.now();
+
+          // Keep the map / "Current Location" label live — this detector
+          // watcher already runs at ~60s cadence for stop/arrival checks,
+          // so piggyback on it instead of starting a second GPS watcher.
+          // Never centre the map on (or store) a low-accuracy fix.
+          if (isAccurateEnough(pos.coords.accuracy)) {
+            setLastPing({
+              tripId: activeTrip.id,
+              lat: latitude,
+              lng: longitude,
+              accuracy: pos.coords.accuracy,
+              speed: pos.coords.speed,
+              heading: pos.coords.heading,
+              timestamp: new Date(pos.timestamp).toISOString(),
+              source: 'gps',
+              synced: false,
+            });
+          }
+
+          // Stop-too-long
+          if (!stopAnchorRef.current) {
+            stopAnchorRef.current = { lat: latitude, lng: longitude };
+            lastMovedAtRef.current = now;
+          } else if (haversineMetres(stopAnchorRef.current.lat, stopAnchorRef.current.lng, latitude, longitude) > STOP_RADIUS_METRES) {
+            stopAnchorRef.current = { lat: latitude, lng: longitude };
+            lastMovedAtRef.current = now;
+          } else if (now - lastMovedAtRef.current >= thresholdMs) {
+            setShowAreYouOkay(true);
+          }
+
+          // Arrival
+          if (destLat != null && destLng != null) {
+            const distToDest = haversineMetres(latitude, longitude, destLat, destLng);
+            if (distToDest <= ARRIVAL_RADIUS_METRES) {
+              if (arrivedSinceRef.current === null) {
+                arrivedSinceRef.current = now;
+              } else if (now - arrivedSinceRef.current >= ARRIVAL_DEBOUNCE_MS) {
+                setShowArrival(true);
+              }
+            } else {
+              arrivedSinceRef.current = null;
+            }
+          }
+        },
+      ).then((sub) => { detectorSubRef.current = sub; }).catch(() => null);
+    }).catch(() => null);
+
+    return () => {
+      detectorSubRef.current?.remove();
+      detectorSubRef.current = null;
+    };
+  }, [activeTrip]);
+
+  // "Are you okay?" — 60s no-response auto-escalates to a silent (level-2) alert.
+  useEffect(() => {
+    if (!showAreYouOkay) return;
+    areYouOkayTimerRef.current = setTimeout(() => {
+      setShowAreYouOkay(false);
+      stopAnchorRef.current = null;
+      lastMovedAtRef.current = Date.now();
+      if (activeTrip) {
+        triggerSilentSOS(activeTrip.id).then((r) => {
+          if (r.success) {
+            setToast({ visible: true, title: 'Checked in with monitoring', subtitle: "You didn't respond in time", duration: 4000 });
+          }
+        });
+      }
+    }, AREYOUOKAY_TIMEOUT_MS);
+    return () => {
+      if (areYouOkayTimerRef.current) clearTimeout(areYouOkayTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showAreYouOkay]);
+
+  const handleAreYouOkayConfirm = () => {
+    setShowAreYouOkay(false);
+    stopAnchorRef.current = null;
+    lastMovedAtRef.current = Date.now();
+  };
+
+  const handleAreYouOkaySOS = () => {
+    setShowAreYouOkay(false);
+    setShowSOSCountdown(true);
+  };
+
+  // Arrival — 5 min no-response auto-ends the trip silently.
+  useEffect(() => {
+    if (!showArrival) return;
+    arrivalAutoEndTimerRef.current = setTimeout(() => {
+      setShowArrival(false);
+      void confirmEndTrip();
+    }, ARRIVAL_AUTO_END_MS);
+    return () => {
+      if (arrivalAutoEndTimerRef.current) clearTimeout(arrivalAutoEndTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArrival]);
+
+  const handleArrivalConfirm = () => {
+    setShowArrival(false);
+    void confirmEndTrip();
+  };
+
+  const handleArrivalDismiss = () => {
+    setShowArrival(false);
+    arrivedSinceRef.current = null;
+  };
+
   // ── SOS handlers ────────────────────────────────────────────────────────────
 
   const handleSOSTap = async () => {
-    if (!activeTrip || sosLoading || sosActive) return;
+    if (sosLoading || sosActive) return;
     setSosLoading(true);
     const firedAt = new Date();
-    const result = await triggerSOS(activeTrip.id, activeTrip.contact_ids ?? []);
+    const result = await triggerSOS(activeTrip?.id ?? null, activeTrip?.contact_ids ?? []);
     setSosLoading(false);
     const timeStr = formatTime(firedAt.toISOString());
     setSosTime(timeStr);
@@ -368,13 +616,35 @@ const HomeScreen = () => {
     if (result.success) {
       setSosActive(true);
       setSosEventId(result.eventId);
+      if (result.eventId) void startSOSRecording(result.eventId);
     } else {
       setSosActive(false);
-      setToast({ visible: true, title: 'SOS sent via SMS', duration: 4000 });
+      setToast({
+        visible: true,
+        title: result.offline ? 'No internet — SOS sent via SMS to your circle' : 'SOS sent via SMS',
+        duration: 4000,
+      });
     }
   };
 
-  const handleCancelSOS = async () => {
+  const handleSOSCountdownConfirm = async () => {
+    await handleSOSTap();
+    return true;
+  };
+
+  // "Cancel SOS" never cancels directly — it opens the PIN-entry sheet.
+  const handleCancelSOS = () => {
+    setCancelPinInput('');
+    setCancelPinError('');
+    setShowSOSCancelPin(true);
+  };
+
+  const confirmCancelSOSWithPin = async () => {
+    // Must be awaited — the final audio chunk's upload has to complete
+    // before the user can navigate to the SOS detail screen, otherwise its
+    // one-time Storage `list()` call finds nothing yet (looks like the
+    // recording never happened).
+    await stopSOSRecording();
     if (!sosEventId) {
       setSosActive(false);
       setSosTime(undefined);
@@ -390,6 +660,39 @@ const HomeScreen = () => {
     } else {
       console.warn('[SOS] Cancel failed:', result.error);
     }
+  };
+
+  const handleCancelPinDigit = async (digit: string) => {
+    const next = cancelPinInput + digit;
+    setCancelPinInput(next);
+    setCancelPinError('');
+
+    if (next.length < 4) return;
+
+    const savedPin = await AsyncStorage.getItem(SOS_PIN_KEY).catch(() => null);
+    if (savedPin && next === savedPin) {
+      setShowSOSCancelPin(false);
+      setCancelPinInput('');
+      await confirmCancelSOSWithPin();
+    } else {
+      setCancelPinError('Incorrect pin. Try again.');
+      setCancelPinInput('');
+    }
+  };
+
+  const handleCancelPinBackspace = () => {
+    setCancelPinInput((p) => p.slice(0, -1));
+    setCancelPinError('');
+  };
+
+  // No dedicated reset flow exists yet — the practical path is re-creating
+  // the PIN via the same first-login setup modal already built for it.
+  const handleForgotSOSPin = async () => {
+    setShowSOSCancelPin(false);
+    setCancelPinInput('');
+    setCancelPinError('');
+    await AsyncStorage.removeItem(SOS_PIN_KEY).catch(() => null);
+    setSetupStep('pin');
   };
 
   // ── Render ────────────────────────────────────────────────────────────────────
@@ -421,7 +724,7 @@ const HomeScreen = () => {
           sosTime={sosTime}
           sosNotified={sosNotified}
           sosTotal={sosTotal}
-          onSOSTap={handleSOSTap}
+          onSOSTap={() => setShowSOSCountdown(true)}
           onCancelSOS={handleCancelSOS}
           onEndTrip={handleEndTrip}
           onNavigateToCircle={() => navigation.navigate('Circle')}
@@ -434,6 +737,40 @@ const HomeScreen = () => {
           contactCount={tripContacts.length}
           onConfirm={confirmEndTrip}
           onCancel={() => setShowEndModal(false)}
+        />
+        <AreYouOkayModal
+          visible={showAreYouOkay}
+          onConfirm={handleAreYouOkayConfirm}
+          onSendSOS={handleAreYouOkaySOS}
+        />
+        <ArrivalModal
+          visible={showArrival}
+          destination={activeTrip.destination}
+          onConfirm={handleArrivalConfirm}
+          onDismiss={handleArrivalDismiss}
+        />
+        <SOSCountdownOverlay
+          visible={showSOSCountdown}
+          currentLocation={lastPing ? coordsFromPing(lastPing) : undefined}
+          onCancel={() => setShowSOSCountdown(false)}
+          onConfirm={handleSOSCountdownConfirm}
+          onDone={() => setShowSOSCountdown(false)}
+        />
+        <SOSCancelPinModal
+          visible={showSOSCancelPin}
+          pinInput={cancelPinInput}
+          pinError={cancelPinError}
+          onDigit={handleCancelPinDigit}
+          onBackspace={handleCancelPinBackspace}
+          onForgotPin={handleForgotSOSPin}
+          onDismiss={() => setShowSOSCancelPin(false)}
+        />
+        <SuccessToast
+          visible={!!tripSummary}
+          title="Trip complete"
+          subtitle={tripSummary ? `${tripSummary.destination?.trim() || 'Your trip'} ended safely` : undefined}
+          duration={4000}
+          onHide={() => setTripSummary(null)}
         />
       </>
     );
@@ -449,6 +786,7 @@ const HomeScreen = () => {
         onHide={() => setToast((t) => ({ ...t, visible: false }))}
       />
       <IdleView
+        userId={userId}
         userName={userName}
         isOnline={isOnline}
         recentTrips={recentTrips}
@@ -456,16 +794,46 @@ const HomeScreen = () => {
         userPlan={userPlan}
         locationGranted={locationGranted}
         familyGroups={familyGroups}
+        sosActive={sosActive}
+        sosTime={sosTime}
+        sosNotified={sosNotified}
+        sosTotal={sosTotal}
         onStartTrip={handleStartTrip}
+        onSOSPress={handleIdleSOS}
+        onCancelSOS={handleCancelSOS}
         onNavigateToCircle={() => navigation.navigate('Circle')}
         onAddCircleMember={() => navigation.navigate('Circle', { openAddModal: true })}
         onNavigateToRoutes={() => navigation.navigate('Routes')}
         onNavigateToSettings={() => navigation.navigate('Settings')}
+        onUpgrade={() => navigation.navigate('Subscription')}
       />
       <StartTripModal
         visible={showStartModal}
         onClose={() => setShowStartModal(false)}
         onTripStarted={handleTripStarted}
+      />
+      <SuccessToast
+        visible={!!tripSummary}
+        title="Trip complete"
+        subtitle={tripSummary ? `${tripSummary.destination?.trim() || 'Your trip'} ended safely` : undefined}
+        duration={4000}
+        onHide={() => setTripSummary(null)}
+      />
+      <SOSCountdownOverlay
+        visible={showSOSCountdown}
+        currentLocation={lastPing ? coordsFromPing(lastPing) : undefined}
+        onCancel={() => setShowSOSCountdown(false)}
+        onConfirm={handleSOSCountdownConfirm}
+        onDone={() => setShowSOSCountdown(false)}
+      />
+      <SOSCancelPinModal
+        visible={showSOSCancelPin}
+        pinInput={cancelPinInput}
+        pinError={cancelPinError}
+        onDigit={handleCancelPinDigit}
+        onBackspace={handleCancelPinBackspace}
+        onForgotPin={handleForgotSOSPin}
+        onDismiss={() => setShowSOSCancelPin(false)}
       />
 
       {/* ── Setup checklist modals ── */}
@@ -625,9 +993,157 @@ const SetupModal = ({
   );
 };
 
+// ── Are you okay? modal (stop-too-long detector) ───────────────────────────────
+
+interface AreYouOkayModalProps {
+  visible: boolean;
+  onConfirm: () => void;
+  onSendSOS: () => void;
+}
+
+const AreYouOkayModal = ({ visible, onConfirm, onSendSOS }: AreYouOkayModalProps) => (
+  <Modal visible={visible} transparent animationType="fade" statusBarTranslucent>
+    <View style={dmStyles.overlay}>
+      <View style={dmStyles.card}>
+        <View style={[dmStyles.iconWrap, dmStyles.iconWrapWarn]}>
+          <Feather name="alert-triangle" size={26} color="#B45309" />
+        </View>
+        <Text style={dmStyles.title}>Are you okay?</Text>
+        <Text style={dmStyles.body}>
+          Your trip has been paused — we haven't seen you move in a while.
+          If we don't hear from you in 60 seconds, monitoring will be quietly notified.
+        </Text>
+        <Pressable style={({ pressed }) => [dmStyles.primaryBtn, pressed && { opacity: 0.85 }]} onPress={onConfirm}>
+          <Text style={dmStyles.primaryBtnText}>I'm fine — continue trip</Text>
+        </Pressable>
+        <Pressable style={({ pressed }) => [dmStyles.dangerBtn, pressed && { opacity: 0.85 }]} onPress={onSendSOS}>
+          <Text style={dmStyles.dangerBtnText}>Send SOS alert</Text>
+        </Pressable>
+      </View>
+    </View>
+  </Modal>
+);
+
+// ── Arrival modal (arrival detector) ────────────────────────────────────────────
+
+interface ArrivalModalProps {
+  visible: boolean;
+  destination: string | null;
+  onConfirm: () => void;
+  onDismiss: () => void;
+}
+
+const ArrivalModal = ({ visible, destination, onConfirm, onDismiss }: ArrivalModalProps) => (
+  <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onDismiss}>
+    <View style={dmStyles.overlay}>
+      <View style={dmStyles.card}>
+        <View style={[dmStyles.iconWrap, dmStyles.iconWrapGood]}>
+          <Feather name="flag" size={26} color={colors.brand.primary} />
+        </View>
+        <Text style={dmStyles.title}>You've arrived{destination ? ` at ${destination}` : ''}</Text>
+        <Text style={dmStyles.body}>End this trip? If you don't respond, it will end automatically in 5 minutes.</Text>
+        <Pressable style={({ pressed }) => [dmStyles.primaryBtn, pressed && { opacity: 0.85 }]} onPress={onConfirm}>
+          <Text style={dmStyles.primaryBtnText}>End trip</Text>
+        </Pressable>
+        <Pressable style={({ pressed }) => [dmStyles.linkBtn, pressed && { opacity: 0.7 }]} onPress={onDismiss}>
+          <Text style={dmStyles.linkBtnText}>Not yet — keep travelling</Text>
+        </Pressable>
+      </View>
+    </View>
+  </Modal>
+);
+
+// ── SOS cancel PIN modal ─────────────────────────────────────────────────────
+
+interface SOSCancelPinModalProps {
+  visible: boolean;
+  pinInput: string;
+  pinError: string;
+  onDigit: (d: string) => void;
+  onBackspace: () => void;
+  onForgotPin: () => void;
+  onDismiss: () => void;
+}
+
+const SOSCancelPinModal = ({
+  visible, pinInput, pinError, onDigit, onBackspace, onForgotPin, onDismiss,
+}: SOSCancelPinModalProps) => (
+  <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onDismiss}>
+    <View style={dmStyles.overlay}>
+      <View style={dmStyles.card}>
+        <View style={[dmStyles.iconWrap, dmStyles.iconWrapWarn]}>
+          <Feather name="shield" size={26} color="#B45309" />
+        </View>
+        <Text style={dmStyles.title}>Enter your SOS PIN</Text>
+        <Text style={dmStyles.body}>Confirm your PIN to cancel this SOS alert.</Text>
+
+        <View style={smStyles.pinDots}>
+          {[0, 1, 2, 3].map((i) => (
+            <View key={i} style={[smStyles.pinDot, pinInput.length > i && smStyles.pinDotFilled]} />
+          ))}
+        </View>
+
+        {pinError ? <Text style={smStyles.pinError}>{pinError}</Text> : null}
+
+        <View style={smStyles.numpad}>
+          {PIN_PAD.map((row, ri) => (
+            <View key={ri} style={smStyles.numpadRow}>
+              {row.map((key) => {
+                if (key === '') return <View key="empty" style={smStyles.numpadKey} />;
+                if (key === '⌫') {
+                  return (
+                    <Pressable
+                      key="back"
+                      style={({ pressed }) => [smStyles.numpadKey, pressed && smStyles.numpadPressed]}
+                      onPress={onBackspace}
+                    >
+                      <Feather name="delete" size={20} color={colors.brand.textPrimary} />
+                    </Pressable>
+                  );
+                }
+                return (
+                  <Pressable
+                    key={key}
+                    style={({ pressed }) => [smStyles.numpadKey, pressed && smStyles.numpadPressed]}
+                    onPress={() => onDigit(key)}
+                    disabled={pinInput.length >= 4}
+                  >
+                    <Text style={smStyles.numpadKeyText}>{key}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ))}
+        </View>
+
+        <Pressable style={({ pressed }) => [dmStyles.linkBtn, pressed && { opacity: 0.7 }]} onPress={onForgotPin}>
+          <Text style={dmStyles.linkBtnText}>Forgot PIN?</Text>
+        </Pressable>
+      </View>
+    </View>
+  </Modal>
+);
+
+const dmStyles = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 28 },
+  card: { width: '100%', backgroundColor: colors.white, borderRadius: 20, paddingHorizontal: 22, paddingTop: 24, paddingBottom: 10, alignItems: 'center' },
+  iconWrap: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', marginBottom: 14 },
+  iconWrapWarn: { backgroundColor: '#FEF3C7' },
+  iconWrapGood: { backgroundColor: colors.brand.light },
+  title: { fontSize: 17, fontWeight: '800', color: colors.brand.textPrimary, marginBottom: 8, textAlign: 'center' },
+  body: { fontSize: 13, color: colors.brand.textSecondary, textAlign: 'center', lineHeight: 19, marginBottom: 18 },
+  primaryBtn: { alignSelf: 'stretch', backgroundColor: colors.brand.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 8 },
+  primaryBtnText: { fontSize: 15, fontWeight: '700', color: colors.white },
+  dangerBtn: { alignSelf: 'stretch', backgroundColor: colors.brand.sos, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 4 },
+  dangerBtnText: { fontSize: 15, fontWeight: '700', color: colors.white },
+  linkBtn: { alignItems: 'center', paddingVertical: 12 },
+  linkBtnText: { fontSize: 13, color: colors.brand.textSecondary, fontWeight: '600' },
+});
+
 // ── Idle view ─────────────────────────────────────────────────────────────────
 
 interface IdleViewProps {
+  userId: string;
   userName: string;
   isOnline: boolean;
   recentTrips: Trip[];
@@ -635,28 +1151,39 @@ interface IdleViewProps {
   userPlan: UserPlan;
   locationGranted: boolean;
   familyGroups: FamilyGroup[];
+  sosActive: boolean;
+  sosTime?: string;
+  sosNotified: number;
+  sosTotal: number;
   onStartTrip: () => void;
+  onSOSPress: () => void;
+  onCancelSOS: () => void;
   onNavigateToCircle: () => void;
   onAddCircleMember: () => void;
   onNavigateToRoutes: () => void;
   onNavigateToSettings: () => void;
+  onUpgrade: () => void;
 }
 
 const IdleView = ({
-  userName, isOnline, recentTrips, contacts, userPlan, locationGranted, familyGroups,
-  onStartTrip, onNavigateToCircle, onAddCircleMember, onNavigateToRoutes, onNavigateToSettings,
+  userId, userName, isOnline, recentTrips, contacts, userPlan, locationGranted, familyGroups,
+  sosActive, sosTime, sosNotified, sosTotal,
+  onStartTrip, onSOSPress, onCancelSOS, onNavigateToCircle, onAddCircleMember, onNavigateToRoutes, onNavigateToSettings, onUpgrade,
 }: IdleViewProps) => {
   const insets = useSafeAreaInsets();
   const visibleContacts = contacts.slice(0, 2);
   const historyItems = recentTrips.slice(0, 2);
 
   // User mode toggle
-  const [userMode, setUserMode] = useState<UserMode>('always_on');
+  const [userMode, setUserMode] = useState<UserMode>('trip');
   const [modeToggleWidth, setModeToggleWidth] = useState(0);
+  const [alwaysOnRunning, setAlwaysOnRunning] = useState(false);
+  const [showUpgradeSheet, setShowUpgradeSheet] = useState(false);
   const modeSlide = useRef(new Animated.Value(userMode === 'trip' ? 1 : 0)).current;
   const modeDragStart = useRef(userMode === 'trip' ? 1 : 0);
-  const alwaysOnSub = useRef<Location.LocationSubscription | null>(null);
+  const addTripScale = useRef(new Animated.Value(1)).current;
   const modeThumbWidth = modeToggleWidth > 0 ? (modeToggleWidth - 6) / 2 : 0;
+  const modeStorageKey = userId ? `${USER_MODE_KEY}:${userId}` : null;
 
   const animateModeTo = useCallback((mode: UserMode) => {
     Animated.spring(modeSlide, {
@@ -668,12 +1195,70 @@ const IdleView = ({
     }).start();
   }, [modeSlide]);
 
-  useEffect(() => {
-    AsyncStorage.getItem(USER_MODE_KEY)
-      .then((v) => { if (v === 'always_on' || v === 'trip') setUserMode(v); })
-      .catch(() => null);
-    return () => { alwaysOnSub.current?.remove(); };
+  const animateAddTrip = useCallback((toValue: number) => {
+    Animated.spring(addTripScale, {
+      toValue,
+      useNativeDriver: true,
+      speed: 30,
+      bounciness: 6,
+    }).start();
+  }, [addTripScale]);
+
+  const startAlwaysOnline = useCallback(async () => {
+    try {
+      const { status } = await Location.getForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        setAlwaysOnRunning(false);
+        return;
+      }
+      setPositionListener((lat, lng) => {
+        setMapRegion({ latitude: lat, longitude: lng, latitudeDelta: 0.01, longitudeDelta: 0.01 });
+      });
+      await startTracking(null, ALWAYS_ONLINE_INTERVAL_MINUTES);
+      setAlwaysOnRunning(true);
+
+      // Battery gate: pause tracking at <=15%, notify, resume automatically
+      // at >20%. Note this shares the one underlying tracking session with
+      // Trip Mode if a trip was attached (general.md: "user can set a trip
+      // when in always on mode") — a low-battery pause here will pause that
+      // trip's pings too, which is intentional (a dying phone can't send
+      // SOS either way).
+      await startBatteryMonitor({
+        onPause: () => {
+          setPositionListener(null);
+          void stopTracking();
+          setAlwaysOnRunning(false);
+          void notifyTrackingPaused();
+        },
+        onResume: () => {
+          void startAlwaysOnline();
+        },
+      });
+    } catch {
+      setAlwaysOnRunning(false);
+    }
   }, []);
+
+  // Restore persisted mode once we know who the user is, and resume Always
+  // Online automatically if that was the last mode (and the plan still
+  // allows it — a downgraded plan should not silently keep tracking).
+  useEffect(() => {
+    if (!modeStorageKey) return;
+    AsyncStorage.getItem(modeStorageKey)
+      .then(async (v) => {
+        if (v !== 'always_on' && v !== 'trip') return;
+        if (v === 'always_on' && userPlan === 'basic') return;
+        setUserMode(v);
+        if (v === 'always_on') await startAlwaysOnline();
+      })
+      .catch(() => null);
+    return () => {
+      // Don't stop tracking here — if a trip starts, StartTripModal attaches
+      // it to this same session instead of restarting it (general.md: "user
+      // can set a trip when in always on mode"). Just detach the map listener.
+      setPositionListener(null);
+    };
+  }, [modeStorageKey, userPlan, startAlwaysOnline]);
 
   useEffect(() => {
     modeDragStart.current = userMode === 'trip' ? 1 : 0;
@@ -681,35 +1266,37 @@ const IdleView = ({
   }, [animateModeTo, userMode]);
 
   const handleModeToggle = async (mode: UserMode) => {
+    // An active SOS locks the dashboard down to "Cancel SOS" only — no mode
+    // switching, no new trips, no navigating away mid-emergency.
+    if (sosActive) return;
+    if (mode === userMode) {
+      animateModeTo(mode);
+      return;
+    }
+    if (mode === 'always_on' && userPlan === 'basic') {
+      setShowUpgradeSheet(true);
+      animateModeTo(userMode);
+      return;
+    }
+
     animateModeTo(mode);
     setUserMode(mode);
-    await AsyncStorage.setItem(USER_MODE_KEY, mode).catch(() => null);
+    if (modeStorageKey) await AsyncStorage.setItem(modeStorageKey, mode).catch(() => null);
 
     if (mode === 'always_on') {
-      // Start foreground location watcher for live map updates
-      Location.getForegroundPermissionsAsync().then(({ status }) => {
-        if (status !== 'granted') return;
-        Location.watchPositionAsync(
-          { accuracy: Location.Accuracy.Balanced, timeInterval: 60_000, distanceInterval: 100 },
-          (pos) => {
-            const { latitude, longitude } = pos.coords;
-            setMapRegion({ latitude, longitude, latitudeDelta: 0.01, longitudeDelta: 0.01 });
-          },
-        ).then((sub) => {
-          alwaysOnSub.current?.remove();
-          alwaysOnSub.current = sub;
-        }).catch(() => null);
-      }).catch(() => null);
+      await startAlwaysOnline();
     } else {
-      alwaysOnSub.current?.remove();
-      alwaysOnSub.current = null;
+      setPositionListener(null);
+      stopBatteryMonitor();
+      await stopTracking();
+      setAlwaysOnRunning(false);
     }
   };
 
   const modePanResponder = PanResponder.create({
     onStartShouldSetPanResponder: () => false,
-    onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dx) > 6 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
-    onMoveShouldSetPanResponderCapture: (_, gesture) => Math.abs(gesture.dx) > 6 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+    onMoveShouldSetPanResponder: (_, gesture) => !sosActive && Math.abs(gesture.dx) > 6 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+    onMoveShouldSetPanResponderCapture: (_, gesture) => !sosActive && Math.abs(gesture.dx) > 6 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
     onPanResponderGrant: () => {
       modeSlide.stopAnimation((value) => {
         modeDragStart.current = typeof value === 'number' ? value : (userMode === 'trip' ? 1 : 0);
@@ -738,22 +1325,23 @@ const IdleView = ({
   // Real GPS location for map
   const [mapRegion, setMapRegion] = useState(NIGERIA_DEFAULT);
   const [locationName, setLocationName] = useState('Detecting location…');
+  const [awaitingPreciseFix, setAwaitingPreciseFix] = useState(true);
 
   useEffect(() => {
     if (!locationGranted) return;
-    Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
+    setAwaitingPreciseFix(true);
+    // Wait for a street-level-accurate fix rather than centring the map on
+    // whatever the first (possibly network-triangulated) reading is.
+    getAccurateFix()
       .then(async (pos) => {
+        setAwaitingPreciseFix(false);
+        if (!pos) return;
         const { latitude, longitude } = pos.coords;
         setMapRegion({ latitude, longitude, latitudeDelta: 0.01, longitudeDelta: 0.01 });
         const [addr] = await Location.reverseGeocodeAsync({ latitude, longitude }).catch(() => [null]);
-        if (addr) {
-          const parts = [addr.city ?? addr.subregion, addr.region].filter(Boolean);
-          setLocationName(parts.join(', ') || 'Current location');
-        } else {
-          setLocationName('Current location');
-        }
+        setLocationName(addr ? streetLevelLabel(addr) : 'Current location');
       })
-      .catch(() => null);
+      .catch(() => setAwaitingPreciseFix(false));
   }, [locationGranted]);
 
   return (
@@ -769,7 +1357,8 @@ const IdleView = ({
       >
         {/* Mode toggle */}
         <Pressable
-          style={styles.modeRow}
+          style={[styles.modeRow, sosActive && styles.lockedControl]}
+          disabled={sosActive}
           onLayout={(event) => setModeToggleWidth(event.nativeEvent.layout.width)}
           onPress={(event) => {
             const tapX = event.nativeEvent.locationX;
@@ -798,10 +1387,22 @@ const IdleView = ({
             pointerEvents="none"
             style={styles.modeSegment}
           >
-            <Feather name="check-circle" size={15} color={userMode === 'always_on' ? colors.white : '#111827'} />
-            <Text style={[styles.modeText, userMode === 'always_on' ? styles.modeTextActive : styles.modeTextInactive]}>
+            <Feather
+              name={userPlan === 'basic' ? 'lock' : 'check-circle'}
+              size={15}
+              color={userPlan === 'basic' ? '#9CA3AF' : userMode === 'always_on' ? colors.white : '#111827'}
+            />
+            <Text style={[
+              styles.modeText,
+              userPlan === 'basic' ? styles.modeGatedText : userMode === 'always_on' ? styles.modeTextActive : styles.modeTextInactive,
+            ]}>
               Always On
             </Text>
+            {userPlan === 'basic' && (
+              <View style={styles.upgradeBadge}>
+                <Text style={styles.upgradeBadgeText}>ELITE</Text>
+              </View>
+            )}
           </View>
           <View
             pointerEvents="none"
@@ -813,6 +1414,29 @@ const IdleView = ({
             </Text>
           </View>
         </Pressable>
+
+        {userMode === 'always_on' && !alwaysOnRunning && (
+          <Pressable style={styles.gpsBanner} onPress={() => void startAlwaysOnline()}>
+            <Feather name="alert-circle" size={14} color="#92400E" />
+            <Text style={styles.gpsBannerText}>Tracking paused — tap to resume</Text>
+          </Pressable>
+        )}
+
+        {sosActive && (
+          <View style={atStyles.sosStatusCard}>
+            <View style={atStyles.sosStatusTop}>
+              <View style={atStyles.sosPulse} />
+              <Text style={atStyles.sosStatusTitle}>SOS alert sent</Text>
+              {sosTime ? <Text style={atStyles.sosStatusTime}>{sosTime}</Text> : null}
+            </View>
+            <Text style={atStyles.sosStatusText}>
+              Contacts reached: {sosNotified} of {sosTotal}
+            </Text>
+            <Pressable style={({ pressed }) => [styles.sosCancelBtn, pressed && { opacity: 0.85 }]} onPress={onCancelSOS}>
+              <Text style={styles.sosCancelBtnText}>Cancel SOS</Text>
+            </Pressable>
+          </View>
+        )}
 
         {/* Map */}
         <View style={styles.mapFullBleed}>
@@ -829,6 +1453,13 @@ const IdleView = ({
               <Marker coordinate={{ latitude: mapRegion.latitude, longitude: mapRegion.longitude }} />
             </MapView>
 
+            {awaitingPreciseFix && (
+              <View style={styles.preciseFixBanner}>
+                <ActivityIndicator size="small" color={colors.white} />
+                <Text style={styles.preciseFixBannerText}>Getting your precise location…</Text>
+              </View>
+            )}
+
             {/* Location badge */}
             <View style={styles.locationBadge}>
               <View style={styles.locationBadgeIcon}>
@@ -842,23 +1473,32 @@ const IdleView = ({
 
             {/* Map controls */}
             <View style={styles.mapControls}>
-              <Pressable style={styles.mapControlBtn}>
-                <Feather name="sliders" size={20} color="#111827" />
-              </Pressable>
+              <Animated.View style={{ transform: [{ scale: addTripScale }] }}>
+                <Pressable
+                  style={[styles.mapControlBtn, sosActive && styles.lockedControl]}
+                  disabled={sosActive}
+                  onPress={onStartTrip}
+                  onPressIn={() => animateAddTrip(0.94)}
+                  onPressOut={() => animateAddTrip(1)}
+                >
+                  <Feather name="plus-circle" size={21} color="#4B0082" />
+                </Pressable>
+              </Animated.View>
               <Pressable
                 style={styles.mapControlBtn}
                 onPress={() => {
                   setMapRegion(NIGERIA_DEFAULT);
                 }}
               >
-                <Feather name="crosshair" size={20} color="#111827" />
+                <Feather name="crosshair" size={20} color="#4B0082" />
               </Pressable>
-              <Pressable style={styles.mapControlBtn}>
-                <Feather name="phone" size={20} color="#111827" />
+              <Pressable style={[styles.mapControlBtn, sosActive && styles.lockedControl]} disabled={sosActive}>
+                <Feather name="phone" size={20} color="#4B0082" />
               </Pressable>
               <Pressable
                 style={styles.sosFab}
-                onPress={onStartTrip}
+                disabled={sosActive}
+                onPress={onSOSPress}
               >
                 <Text style={styles.sosStar}>✱</Text>
                 <Text style={styles.sosText}>SOS</Text>
@@ -869,7 +1509,7 @@ const IdleView = ({
 
         {/* My Safety Circle */}
         <View style={styles.safetyCircleSection}>
-          <DashboardSection title="My Safety Circle" action="View All" onAction={onNavigateToCircle}>
+          <DashboardSection title="My Safety Circle" action="View All" onAction={onNavigateToCircle} disabled={sosActive}>
             {visibleContacts.map((c) => (
               <View key={c.id} style={styles.dashboardContactRow}>
                 <View style={styles.dashboardAvatar}>
@@ -895,7 +1535,7 @@ const IdleView = ({
         </View>
 
         {/* History */}
-        <DashboardSection title="History" action="View All" onAction={onNavigateToRoutes}>
+        <DashboardSection title="History" action="View All" onAction={onNavigateToRoutes} disabled={sosActive}>
           {historyItems.length === 0 ? (
             <View style={styles.emptyHistoryCard}>
               <Feather name="clock" size={20} color="#D1D5DB" />
@@ -919,7 +1559,7 @@ const IdleView = ({
         </DashboardSection>
 
         {/* Family Groups */}
-        <DashboardSection title="Family Groups" action="View All" onAction={onNavigateToCircle}>
+        <DashboardSection title="Family Groups" action="View All" onAction={onNavigateToCircle} disabled={sosActive}>
           {userPlan === 'basic' ? (
             <View style={styles.upgradeCard}>
               <View style={styles.upgradeLockIcon}>
@@ -964,13 +1604,66 @@ const IdleView = ({
       {/* Tab bar */}
       <View style={[styles.tabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
         <TabBarItem icon="grid" label="Dashboard" active />
-        <TabBarItem icon="users" label="Circle" onPress={onNavigateToCircle} />
-        <TabBarItem icon="clock" label="History" onPress={onNavigateToRoutes} />
-        <TabBarItem icon="user" label="Profile" onPress={onNavigateToSettings} />
+        <TabBarItem icon="users" label="Circle" onPress={onNavigateToCircle} disabled={sosActive} />
+        <TabBarItem icon="clock" label="History" onPress={onNavigateToRoutes} disabled={sosActive} />
+        <TabBarItem icon="user" label="Profile" onPress={onNavigateToSettings} disabled={sosActive} />
       </View>
+
+      <UpgradeSheet
+        visible={showUpgradeSheet}
+        onClose={() => setShowUpgradeSheet(false)}
+        onUpgrade={() => { setShowUpgradeSheet(false); onUpgrade(); }}
+      />
     </View>
   );
 };
+
+// ── Upgrade sheet (Always Online on Basic plan) ─────────────────────────────────
+
+interface UpgradeSheetProps {
+  visible: boolean;
+  onClose: () => void;
+  onUpgrade: () => void;
+}
+
+const UpgradeSheet = ({ visible, onClose, onUpgrade }: UpgradeSheetProps) => (
+  <Modal visible={visible} transparent animationType="slide" statusBarTranslucent onRequestClose={onClose}>
+    <View style={usStyles.overlay}>
+      <Pressable style={usStyles.dismiss} onPress={onClose} />
+      <View style={usStyles.sheet}>
+        <View style={usStyles.handleRow}><View style={usStyles.handle} /></View>
+        <View style={usStyles.iconWrap}>
+          <Feather name="lock" size={22} color="#6B21A8" />
+        </View>
+        <Text style={usStyles.title}>Always Online is an Elite feature</Text>
+        <Text style={usStyles.body}>
+          Upgrade to unlock continuous tracking, Follow me, and Family mode.
+        </Text>
+        <Pressable style={({ pressed }) => [usStyles.upgradeBtn, pressed && { opacity: 0.85 }]} onPress={onUpgrade}>
+          <Text style={usStyles.upgradeBtnText}>Upgrade now</Text>
+        </Pressable>
+        <Pressable style={usStyles.cancelLink} onPress={onClose}>
+          <Text style={usStyles.cancelLinkText}>Not now</Text>
+        </Pressable>
+      </View>
+    </View>
+  </Modal>
+);
+
+const usStyles = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
+  dismiss: { flex: 1 },
+  sheet: { backgroundColor: colors.white, borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingHorizontal: 24, paddingBottom: 28, alignItems: 'center' },
+  handleRow: { alignSelf: 'stretch', alignItems: 'center', marginTop: 10, marginBottom: 6 },
+  handle: { width: 32, height: 3, borderRadius: 2, backgroundColor: 'rgba(0,0,0,0.1)' },
+  iconWrap: { width: 52, height: 52, borderRadius: 26, backgroundColor: '#F3E8FF', alignItems: 'center', justifyContent: 'center', marginTop: 14, marginBottom: 14 },
+  title: { fontSize: 17, fontWeight: '800', color: colors.brand.textPrimary, textAlign: 'center', marginBottom: 8 },
+  body: { fontSize: 13, color: colors.brand.textSecondary, textAlign: 'center', lineHeight: 19, marginBottom: 20 },
+  upgradeBtn: { alignSelf: 'stretch', backgroundColor: '#6B21A8', borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 6 },
+  upgradeBtnText: { fontSize: 15, fontWeight: '700', color: colors.white },
+  cancelLink: { paddingVertical: 12 },
+  cancelLinkText: { fontSize: 13, color: colors.brand.textSecondary, fontWeight: '600' },
+});
 
 // ── Section wrapper ───────────────────────────────────────────────────────────
 
@@ -978,19 +1671,20 @@ interface DashboardSectionProps {
   title: string;
   action: string;
   onAction: () => void;
+  disabled?: boolean;
   children: React.ReactNode;
 }
 
-const DashboardSection = ({ title, action, onAction, children }: DashboardSectionProps) => (
+const DashboardSection = ({ title, action, onAction, disabled, children }: DashboardSectionProps) => (
   <View style={styles.dashboardSection}>
     <View style={styles.dashboardSectionHeader}>
       <Text style={styles.dashboardSectionTitle}>{title}</Text>
-      <Pressable style={styles.dashboardSectionAction} onPress={onAction}>
-        <Text style={styles.dashboardSectionActionText}>{action}</Text>
-        <Feather name="chevron-right" size={14} color="#6B21A8" />
+      <Pressable style={styles.dashboardSectionAction} onPress={onAction} disabled={disabled}>
+        <Text style={[styles.dashboardSectionActionText, disabled && styles.lockedText]}>{action}</Text>
+        <Feather name="chevron-right" size={14} color={disabled ? '#9CA3AF' : '#6B21A8'} />
       </Pressable>
     </View>
-    <View style={styles.dashboardSectionBody}>{children}</View>
+    <View style={[styles.dashboardSectionBody, disabled && styles.lockedControl]} pointerEvents={disabled ? 'none' : 'auto'}>{children}</View>
   </View>
 );
 
@@ -1019,263 +1713,398 @@ const ActiveTripView = ({
 }: ActiveTripViewProps) => {
   const insets = useSafeAreaInsets();
 
-  const [elapsed, setElapsed] = useState('');
+  const [elapsed, setElapsed] = useState('0m');
   useEffect(() => {
     function compute() {
-      const ms = Date.now() - new Date(trip.created_at).getTime();
+      // Clamp to 0 — a trip that just started can briefly read a negative
+      // delta if the device clock is a few hundred ms behind the server
+      // timestamp on `trip.created_at`, which previously rendered "-1m".
+      const ms = Math.max(0, Date.now() - new Date(trip.created_at).getTime());
       const h = Math.floor(ms / 3_600_000);
       const m = Math.floor((ms % 3_600_000) / 60_000);
       setElapsed(h > 0 ? `${h}h ${m}m` : `${m}m`);
     }
     compute();
-    const id = setInterval(compute, 60_000);
+    const id = setInterval(compute, 30_000);
     return () => clearInterval(id);
   }, [trip.created_at]);
 
-  const handleBackground = () => {
-    if (Platform.OS === 'android') {
-      BackHandler.exitApp();
-    } else {
-      Alert.alert('Background Hadin', 'Swipe up and go home to background Hadin. Your trip is still active.');
-    }
-  };
-
   const started = trip.started_at ?? trip.created_at;
-  const startedStr = formatTime(started);
-  const metaStr = [
-    `Started ${startedStr}`,
-    trip.expected_stops ? `${trip.expected_stops} stop${trip.expected_stops !== 1 ? 's' : ''}` : null,
-    trip.max_stop_duration_minutes ? `${trip.max_stop_duration_minutes}m max` : null,
-  ].filter(Boolean).join(' · ');
+  const destination = trip.destination?.trim() || 'Destination';
+  const estimatedTime = trip.expected_duration_minutes
+    ? `${trip.expected_duration_minutes} mins`
+    : trip.max_stop_duration_minutes
+      ? `${trip.max_stop_duration_minutes} mins`
+      : '25 mins';
+  const updated = lastPing ? formatTime(lastPing.timestamp) : formatTime(started);
+  const coords = lastPing
+    ? `${Math.abs(lastPing.lat).toFixed(4)}° ${lastPing.lat >= 0 ? 'N' : 'S'}, ${Math.abs(lastPing.lng).toFixed(4)}° ${lastPing.lng >= 0 ? 'E' : 'W'}`
+    : 'Waiting for first ping';
 
-  const visibleContacts = tripContacts.slice(0, 2);
-  const overflowContacts = tripContacts.slice(2);
+  // Live "Current Location" label — reverse-geocoded from the latest ping,
+  // re-resolved whenever the ping's coordinates actually move.
+  const [currentLocationName, setCurrentLocationName] = useState(trip.origin?.trim() || 'Locating…');
+  const [activeMapInfo, setActiveMapInfo] = useState<'current' | 'destination' | null>(null);
+  const mapInfoSlide = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!lastPing) return;
+    Location.reverseGeocodeAsync({ latitude: lastPing.lat, longitude: lastPing.lng })
+      .then(([addr]) => {
+        if (!addr) return;
+        setCurrentLocationName(streetLevelLabel(addr));
+      })
+      .catch(() => null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastPing?.lat, lastPing?.lng]);
+
+  const mapRegion = lastPing
+    ? { latitude: lastPing.lat, longitude: lastPing.lng, latitudeDelta: 0.01, longitudeDelta: 0.01 }
+    : trip.destination_lat != null && trip.destination_lng != null
+      ? { latitude: trip.destination_lat, longitude: trip.destination_lng, latitudeDelta: 0.05, longitudeDelta: 0.05 }
+      : NIGERIA_DEFAULT;
+
+  const toggleMapInfo = (target: 'current' | 'destination') => {
+    if (activeMapInfo === target) {
+      Animated.timing(mapInfoSlide, {
+        toValue: 0,
+        duration: 160,
+        useNativeDriver: true,
+      }).start(() => setActiveMapInfo(null));
+      return;
+    }
+
+    mapInfoSlide.setValue(0);
+    setActiveMapInfo(target);
+    Animated.spring(mapInfoSlide, {
+      toValue: 1,
+      useNativeDriver: true,
+      speed: 24,
+      bounciness: 5,
+    }).start();
+  };
 
   return (
     <View style={[atStyles.root, { paddingTop: insets.top }]}>
-      {sosActive ? (
-        <View style={atStyles.sosBanner}>
-          <View style={atStyles.sosBannerDot} />
-          <Text style={atStyles.sosBannerTxt}>SOS alert sent</Text>
-          {sosTime ? <Text style={atStyles.sosBannerTime}>{sosTime}</Text> : null}
+      <View style={atStyles.header}>
+        <View style={atStyles.headerLeft}>
+          <Pressable style={atStyles.backBtn} onPress={onNavigateToRoutes} hitSlop={8} disabled={sosActive}>
+            <Feather name="arrow-left" size={22} color={sosActive ? '#D1D5DB' : '#111827'} />
+          </Pressable>
+          <Text style={atStyles.headerTitle}>Active Trip</Text>
         </View>
-      ) : (
-        <View style={atStyles.banner}>
-          <View style={atStyles.bannerLeft}>
-            <View style={atStyles.bannerDot} />
-            <Text style={atStyles.bannerTxt}>Trip active</Text>
-          </View>
-          <View style={atStyles.bannerRight}>
-            {elapsed ? <Text style={atStyles.bannerTimer}>{elapsed}</Text> : null}
-            <Pressable
-              style={({ pressed }) => [atStyles.bgChip, pressed && { opacity: 0.7 }]}
-              onPress={handleBackground}
-            >
-              <Feather name="minimize-2" size={13} color="rgba(255,255,255,0.85)" />
-              <Text style={atStyles.bgChipTxt}>Background</Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
-
-      <View style={atStyles.routeHdr}>
-        <Text style={atStyles.routeText} numberOfLines={1}>
-          {trip.origin ?? '—'}  →  {trip.destination ?? '—'}
-        </Text>
-        <Text style={atStyles.routeMeta}>
-          {sosActive ? 'SOS triggered · Trip still active' : metaStr}
-        </Text>
       </View>
 
       <ScrollView
         style={atStyles.scroll}
-        contentContainerStyle={[atStyles.scrollContent, { paddingBottom: insets.bottom + 32 }]}
+        contentContainerStyle={[atStyles.scrollContent, { paddingBottom: insets.bottom + 98 }]}
         showsVerticalScrollIndicator={false}
       >
-        {!sosActive && (
-          <View style={atStyles.statRow}>
-            <View style={atStyles.statBox}>
-              <Text style={atStyles.statVal}>{elapsed || '0m'}</Text>
-              <Text style={atStyles.statKey}>Elapsed</Text>
-            </View>
-            <View style={atStyles.statBox}>
-              <Text style={atStyles.statVal}>0</Text>
-              <Text style={atStyles.statKey}>Pings</Text>
-            </View>
-            <View style={atStyles.statBox}>
-              <Text style={atStyles.statVal}>{trip.expected_stops}</Text>
-              <Text style={atStyles.statKey}>Stops</Text>
-            </View>
-            <View style={atStyles.statBox}>
-              <Text style={atStyles.statVal}>{trip.max_stop_duration_minutes}m</Text>
-              <Text style={atStyles.statKey}>Max stop</Text>
-            </View>
-          </View>
-        )}
-
-        {!sosActive && (
-          <View style={atStyles.card}>
-            <Text style={atStyles.cardLbl}>Last known location</Text>
-            {lastPing ? (
-              <>
-                <View style={atStyles.locRow}>
-                  <Text style={atStyles.locKey}>Coordinates</Text>
-                  <Text style={atStyles.locVal}>{lastPing.lat.toFixed(4)}°N, {lastPing.lng.toFixed(4)}°E</Text>
-                </View>
-                <View style={[atStyles.locRow, atStyles.locRowLast]}>
-                  <Text style={atStyles.locKey}>Updated</Text>
-                  <Text style={atStyles.locVal}>{formatTime(lastPing.timestamp)}</Text>
-                </View>
-              </>
-            ) : (
-              <Text style={atStyles.locWait}>Waiting for first ping…</Text>
+        <View style={atStyles.mapPanel}>
+          <MapView style={atStyles.mapImage} region={mapRegion}>
+            {lastPing && (
+              <Marker
+                coordinate={{ latitude: lastPing.lat, longitude: lastPing.lng }}
+                title="Current location"
+                pinColor="#0051D5"
+              />
             )}
-            <View style={atStyles.locNote}>
-              <Feather name="lock" size={12} color={colors.brand.border} />
-              <Text style={atStyles.locNoteTxt}>Shared with your circle only when you send SOS</Text>
-            </View>
-          </View>
-        )}
+            {trip.destination_lat != null && trip.destination_lng != null && (
+              <Marker
+                coordinate={{ latitude: trip.destination_lat, longitude: trip.destination_lng }}
+                title="Destination"
+                pinColor="#BA1A1A"
+              />
+            )}
+          </MapView>
 
-        {sosActive && (
-          <View style={atStyles.card}>
-            <Text style={atStyles.cardLbl}>Alert details</Text>
-            <View style={atStyles.alertRow}>
-              <Text style={atStyles.alertKey}>Time</Text>
-              <Text style={atStyles.alertVal}>{sosTime}</Text>
+          {!lastPing && (
+            <View style={atStyles.preciseFixBanner}>
+              <ActivityIndicator size="small" color={colors.white} />
+              <Text style={atStyles.preciseFixBannerText}>Getting your precise location…</Text>
             </View>
-            <View style={atStyles.alertRow}>
-              <Text style={atStyles.alertKey}>Contacts reached</Text>
-              <Text style={[atStyles.alertVal, atStyles.alertValGreen]}>{sosNotified} of {sosTotal}</Text>
-            </View>
-            <View style={[atStyles.alertRow, atStyles.alertRowLast]}>
-              <Text style={atStyles.alertKey}>Delivered via</Text>
-              <Text style={[atStyles.alertVal, atStyles.alertValGreen]}>{sosNotified > 0 ? 'SMS' : 'SMS (fallback)'}</Text>
-            </View>
-          </View>
-        )}
+          )}
 
-        {sosActive && tripContacts.length > 0 && (
-          <View style={atStyles.card}>
-            <Text style={atStyles.cardLbl}>Notified</Text>
-            {tripContacts.map((c, i) => {
-              const pal = avatarColors(i);
-              return (
-                <View key={c.id} style={[atStyles.nrRow, i === tripContacts.length - 1 && atStyles.nrRowLast]}>
-                  <View style={[atStyles.ciAv, { backgroundColor: pal.bg }]}>
-                    <Text style={[atStyles.ciAvTxt, { color: pal.fg }]}>{initials(c.name)}</Text>
-                  </View>
-                  <Text style={atStyles.nrName}>{c.name}</Text>
-                  <View style={atStyles.nrBadge}>
-                    <Text style={atStyles.nrBadgeTxt}>SMS sent</Text>
-                  </View>
-                </View>
-              );
-            })}
-          </View>
-        )}
-
-        {!sosActive && (
-          <View style={atStyles.card}>
-            <View style={atStyles.sbTop}>
-              <View style={atStyles.sbLeft}>
-                <View style={atStyles.sbDot} />
-                <Text style={atStyles.sbTitle}>Circle on standby</Text>
+          {activeMapInfo ? (
+            <Animated.View
+              style={[
+                atStyles.mapInfoPanel,
+                {
+                  opacity: mapInfoSlide,
+                  transform: [
+                    { translateY: -31 },
+                    {
+                      translateX: mapInfoSlide.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [18, 0],
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            >
+              <Feather
+                name={activeMapInfo === 'current' ? 'navigation' : 'map-pin'}
+                size={22}
+                color={activeMapInfo === 'current' ? '#0051D5' : '#BA1A1A'}
+              />
+              <View style={atStyles.mapInfoText}>
+                <Text style={atStyles.mapInfoLabel}>
+                  {activeMapInfo === 'current' ? 'Current Location' : 'Destination'}
+                </Text>
+                <Text style={atStyles.mapInfoValue} numberOfLines={2}>
+                  {activeMapInfo === 'current' ? currentLocationName : destination}
+                </Text>
               </View>
-              {tripContacts.length > 0 && (
-                <View style={atStyles.sbPill}>
-                  <Text style={atStyles.sbPillTxt}>{tripContacts.length} contact{tripContacts.length !== 1 ? 's' : ''}</Text>
-                </View>
-              )}
-            </View>
+            </Animated.View>
+          ) : null}
 
-            {tripContacts.length === 0 ? (
-              <Text style={atStyles.emptyCircleTxt}>Add contacts to your circle →</Text>
-            ) : (
-              <>
-                {visibleContacts.map((c, i) => {
-                  const pal = avatarColors(i);
-                  return (
-                    <View key={c.id} style={[atStyles.ciRow, i === visibleContacts.length - 1 && overflowContacts.length === 0 && atStyles.ciRowLast]}>
-                      <View style={[atStyles.ciAv, { backgroundColor: pal.bg }]}>
-                        <Text style={[atStyles.ciAvTxt, { color: pal.fg }]}>{initials(c.name)}</Text>
-                      </View>
-                      <View style={atStyles.ciInfo}>
-                        <Text style={atStyles.ciName}>{c.name}</Text>
-                        <Text style={atStyles.ciRel}>{c.relationship ?? 'Contact'}</Text>
-                      </View>
-                      <Text style={atStyles.ciStatus}>On standby</Text>
-                    </View>
-                  );
-                })}
-                {overflowContacts.length > 0 && (
-                  <View style={atStyles.overflowRow}>
-                    <View style={atStyles.stackedAvatars}>
-                      {overflowContacts.slice(0, 3).map((c, i) => {
-                        const pal = avatarColors(i + 2);
-                        return (
-                          <View key={c.id} style={[atStyles.stackedAv, { backgroundColor: pal.bg, zIndex: 3 - i }]}>
-                            <Text style={[atStyles.stackedAvTxt, { color: pal.fg }]}>{initials(c.name)}</Text>
-                          </View>
-                        );
-                      })}
-                    </View>
-                    <Text style={atStyles.moreLbl}>
-                      <Text style={atStyles.moreLblBold}>{overflowContacts.length} more</Text>
-                      {' watching over you'}
-                    </Text>
-                  </View>
-                )}
-              </>
-            )}
+          <View style={atStyles.mapInfoControls}>
+            <Pressable
+              style={[atStyles.mapInfoIconBtn, activeMapInfo === 'current' && atStyles.mapInfoIconBtnActive]}
+              onPress={() => toggleMapInfo('current')}
+            >
+              <Feather name="navigation" size={20} color={activeMapInfo === 'current' ? '#FFFFFF' : '#0051D5'} />
+            </Pressable>
+            <Pressable
+              style={[atStyles.mapInfoIconBtn, activeMapInfo === 'destination' && atStyles.mapInfoIconBtnActive]}
+              onPress={() => toggleMapInfo('destination')}
+            >
+              <Feather name="map-pin" size={20} color={activeMapInfo === 'destination' ? '#FFFFFF' : '#BA1A1A'} />
+            </Pressable>
           </View>
-        )}
+        </View>
 
-        {!sosActive && (
+        <View style={atStyles.statGrid}>
+          <View style={atStyles.statCard}>
+            <Feather name="clock" size={24} color="#7C839B" />
+            <Text style={atStyles.statLabel}>Estimated Time</Text>
+            <Text style={atStyles.statValue}>{estimatedTime}</Text>
+          </View>
+          <View style={atStyles.statCard}>
+            <Feather name="activity" size={24} color="#0051D5" />
+            <Text style={atStyles.statLabel}>Time Elapsed</Text>
+            <Text style={atStyles.statValue}>{elapsed || '0m'}</Text>
+          </View>
+        </View>
+
+        <View style={atStyles.actionStack}>
+          <Pressable
+            style={({ pressed }) => [atStyles.arrivedBtn, pressed && !sosActive && { opacity: 0.88 }, sosActive && styles.lockedControl]}
+            onPress={onEndTrip}
+            disabled={sosActive}
+          >
+            <Feather name="check-circle" size={24} color="#FFFFFF" />
+            <Text style={atStyles.actionText}>Arrived</Text>
+          </Pressable>
+
           <Pressable
             style={({ pressed }) => [atStyles.sosBtn, pressed && !sosLoading && { opacity: 0.85 }, sosLoading && { opacity: 0.6 }]}
-            onPress={onSOSTap}
+            onPress={sosActive ? onCancelSOS : onSOSTap}
             disabled={sosLoading}
           >
-            <View style={atStyles.sosIconCircle}>
-              {sosLoading ? (
-                <ActivityIndicator color={colors.white} size="small" />
-              ) : (
-                <Feather name="alert-triangle" size={18} color={colors.white} />
-              )}
-            </View>
-            <View style={atStyles.sosTextBlock}>
-              <Text style={atStyles.sosTitle}>Send SOS alert</Text>
-              <Text style={atStyles.sosSub}>Notifies all {tripContacts.length} contact{tripContacts.length !== 1 ? 's' : ''} instantly</Text>
-            </View>
-            <Feather name="chevron-right" size={20} color="rgba(255,255,255,0.55)" />
+            {sosLoading ? (
+              <ActivityIndicator color="#FFFFFF" size="small" />
+            ) : (
+              <Feather name={sosActive ? 'x-circle' : 'home'} size={24} color="#FFFFFF" />
+            )}
+            <Text style={atStyles.actionText}>{sosActive ? 'Cancel SOS' : 'SOS'}</Text>
           </Pressable>
-        )}
+        </View>
 
         {sosActive && (
-          <Pressable
-            style={({ pressed }) => [atStyles.cancelBtn, pressed && { opacity: 0.8 }]}
-            onPress={onCancelSOS}
-          >
-            <Text style={atStyles.cancelTxt}>I'm safe — cancel this alert</Text>
-          </Pressable>
+          <View style={atStyles.sosStatusCard}>
+            <View style={atStyles.sosStatusTop}>
+              <View style={atStyles.sosPulse} />
+              <Text style={atStyles.sosStatusTitle}>SOS alert sent</Text>
+              {sosTime ? <Text style={atStyles.sosStatusTime}>{sosTime}</Text> : null}
+            </View>
+            <Text style={atStyles.sosStatusText}>
+              Contacts reached: {sosNotified} of {sosTotal || tripContacts.length}
+            </Text>
+          </View>
         )}
 
-        <Pressable
-          style={({ pressed }) => [atStyles.endBtn, pressed && { opacity: 0.7 }]}
-          onPress={onEndTrip}
-        >
-          <Text style={atStyles.endTxt}>{sosActive ? 'End trip' : "I've arrived safely — end trip"}</Text>
-        </Pressable>
+        <View style={atStyles.detailCard}>
+          <View style={atStyles.detailRow}>
+            <View style={atStyles.detailLeft}>
+              <Feather name="compass" size={15} color="#45464D" />
+              <Text style={atStyles.detailLabel}>Last Known Location</Text>
+            </View>
+            <Text style={atStyles.detailValue} numberOfLines={1}>{coords}</Text>
+          </View>
+          <View style={[atStyles.detailRow, atStyles.detailRowLast]}>
+            <View style={atStyles.detailLeft}>
+              <Feather name="refresh-cw" size={15} color="#45464D" />
+              <Text style={atStyles.detailLabel}>Last Updated</Text>
+            </View>
+            <View style={atStyles.liveWrap}>
+              <View style={atStyles.liveDot} />
+              <Text style={atStyles.liveText}>{lastPing ? updated : 'Pending'}</Text>
+            </View>
+          </View>
+        </View>
       </ScrollView>
 
       <View style={[styles.atTabBar, { paddingBottom: insets.bottom || spacing.gap8 }]}>
         <TabBarItem icon="grid" label="Dashboard" active />
-        <TabBarItem icon="users" label="Circle" onPress={onNavigateToCircle} />
-        <TabBarItem icon="clock" label="History" onPress={onNavigateToRoutes} />
-        <TabBarItem icon="user" label="Profile" onPress={onNavigateToSettings} />
+        <TabBarItem icon="users" label="Circle" onPress={onNavigateToCircle} disabled={sosActive} />
+        <TabBarItem icon="clock" label="History" onPress={onNavigateToRoutes} disabled={sosActive} />
+        <TabBarItem icon="user" label="Profile" onPress={onNavigateToSettings} disabled={sosActive} />
       </View>
     </View>
+  );
+};
+
+// ── SOS countdown overlay ────────────────────────────────────────────────────
+
+interface SOSCountdownOverlayProps {
+  visible: boolean;
+  currentLocation?: string;
+  onCancel: () => void;
+  onConfirm: () => Promise<boolean>;
+  onDone: () => void;
+}
+
+const SOSCountdownOverlay = ({ visible, currentLocation, onCancel, onConfirm, onDone }: SOSCountdownOverlayProps) => {
+  const insets = useSafeAreaInsets();
+  const [seconds, setSeconds] = useState(SOS_COUNTDOWN_SECONDS);
+  const [confirming, setConfirming] = useState(false);
+  const [sent, setSent] = useState(false);
+  const hasTriggeredRef = useRef(false);
+  const pulse = useRef(new Animated.Value(0)).current;
+
+  const fireSOS = useCallback(async () => {
+    if (hasTriggeredRef.current) return;
+    hasTriggeredRef.current = true;
+    setConfirming(true);
+    const ok = await onConfirm();
+    setConfirming(false);
+    if (ok) {
+      setSent(true);
+    } else {
+      hasTriggeredRef.current = false;
+    }
+  }, [onConfirm]);
+
+  useEffect(() => {
+    if (!visible) return;
+    setSeconds(SOS_COUNTDOWN_SECONDS);
+    setConfirming(false);
+    setSent(false);
+    hasTriggeredRef.current = false;
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible || sent) return;
+    if (seconds <= 0) {
+      void fireSOS();
+      return;
+    }
+    const id = setTimeout(() => setSeconds((s) => s - 1), 1000);
+    return () => clearTimeout(id);
+  }, [fireSOS, seconds, sent, visible]);
+
+  useEffect(() => {
+    if (!visible || sent) return;
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 1200, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0, duration: 0, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse, sent, visible]);
+
+  const handleCancel = () => {
+    if (confirming) return;
+    onCancel();
+  };
+
+  const handleDone = () => {
+    onDone();
+  };
+
+  const progress = Math.max(0, seconds / SOS_COUNTDOWN_SECONDS);
+  const pulseScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.32] });
+  const pulseOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.38, 0] });
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={handleCancel}>
+      {sent ? (
+        <View style={[sosCountdownStyles.successRoot, { paddingTop: insets.top, paddingBottom: insets.bottom + 28 }]}>
+          <View style={sosCountdownStyles.successIcon}>
+            <Feather name="check" size={38} color="#009668" />
+          </View>
+          <Text style={sosCountdownStyles.successTitle}>Help is on the way</Text>
+          <Text style={sosCountdownStyles.successText}>
+            Emergency responders and your safety circle have been notified with your live coordinates.
+          </Text>
+          <Pressable style={({ pressed }) => [sosCountdownStyles.returnBtn, pressed && { opacity: 0.88 }]} onPress={handleDone}>
+            <Text style={sosCountdownStyles.returnBtnText}>Return to Dashboard</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <View style={[sosCountdownStyles.overlay, { paddingTop: insets.top + 28, paddingBottom: insets.bottom + 28 }]}>
+          <View style={sosCountdownStyles.alertTop}>
+            <Feather name="alert-triangle" size={48} color="#BA1A1A" />
+            <Text style={sosCountdownStyles.alertTitle}>Emergency SOS</Text>
+            <Text style={sosCountdownStyles.alertSub}>Alerting your emergency contacts in...</Text>
+          </View>
+
+          <View style={sosCountdownStyles.countWrap}>
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                sosCountdownStyles.pulseRing,
+                { opacity: pulseOpacity, transform: [{ scale: pulseScale }] },
+              ]}
+            />
+            <View style={sosCountdownStyles.outerRing}>
+              <View style={[sosCountdownStyles.progressRing, { opacity: 0.3 + progress * 0.7 }]} />
+              <View style={sosCountdownStyles.innerRing}>
+                <Text style={sosCountdownStyles.countNumber}>{seconds}</Text>
+                <Text style={sosCountdownStyles.countLabel}>Seconds</Text>
+              </View>
+            </View>
+          </View>
+
+          <View style={sosCountdownStyles.locationCard}>
+            <View style={sosCountdownStyles.locationIcon}>
+              <Feather name="map-pin" size={22} color="#BA1A1A" />
+            </View>
+            <View style={sosCountdownStyles.locationCopy}>
+              <Text style={sosCountdownStyles.locationLabel}>Current Location</Text>
+              <Text style={sosCountdownStyles.locationValue} numberOfLines={2}>
+                {currentLocation || 'Getting your live coordinates'}
+              </Text>
+            </View>
+          </View>
+
+          <View style={sosCountdownStyles.actionCluster}>
+            <Pressable
+              style={({ pressed }) => [sosCountdownStyles.confirmBtn, pressed && !confirming && { opacity: 0.88 }, confirming && { opacity: 0.7 }]}
+              onPress={fireSOS}
+              disabled={confirming}
+            >
+              {confirming ? <ActivityIndicator color="#FFFFFF" size="small" /> : <Text style={sosCountdownStyles.confirmText}>Confirm Alert</Text>}
+              {!confirming && <Feather name="send" size={22} color="#FFFFFF" />}
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [sosCountdownStyles.cancelBtn, pressed && !confirming && { backgroundColor: 'rgba(255,255,255,0.08)' }]}
+              onPress={handleCancel}
+              disabled={confirming}
+            >
+              <Text style={sosCountdownStyles.cancelText}>Cancel</Text>
+            </Pressable>
+          </View>
+
+          <Text style={sosCountdownStyles.footerNote}>
+            Falsely triggering alerts may result in service limitations. Hadin encryption is currently active.
+          </Text>
+        </View>
+      )}
+    </Modal>
   );
 };
 
@@ -1294,7 +2123,7 @@ const EndTripModal = ({ visible, trip, contactCount, onConfirm, onCancel }: EndT
   useEffect(() => {
     if (!visible) return;
     function compute() {
-      const ms = Date.now() - new Date(trip.created_at).getTime();
+      const ms = Math.max(0, Date.now() - new Date(trip.created_at).getTime());
       const h = Math.floor(ms / 3_600_000);
       const m = Math.floor((ms % 3_600_000) / 60_000);
       setElapsed(h > 0 ? `${h}h ${m}m` : `${m}m`);
@@ -1310,11 +2139,13 @@ const EndTripModal = ({ visible, trip, contactCount, onConfirm, onCancel }: EndT
         <Pressable style={etStyles.card} onPress={() => {}}>
           <View style={etStyles.header}>
             <View style={etStyles.routeRow}>
-              <Feather name="navigation" size={13} color="rgba(255,255,255,0.5)" />
-              <Text style={etStyles.routeTxt} numberOfLines={1}>{trip.origin ?? '—'}  →  {trip.destination ?? '—'}</Text>
+              <Feather name="navigation" size={18} color="rgba(255,255,255,0.82)" />
+              <Text style={etStyles.routeTxt} numberOfLines={1}>
+                Current location <Text style={etStyles.routeArrow}>→</Text> {trip.destination?.trim() || 'Destination'}
+              </Text>
             </View>
             <Text style={etStyles.metaTxt}>
-              {[elapsed, contactCount > 0 ? `${contactCount} contact${contactCount !== 1 ? 's' : ''}` : null].filter(Boolean).join('  ·  ')}
+              {[elapsed, `${contactCount} contact${contactCount !== 1 ? 's' : ''}`].filter(Boolean).join(' · ')}
             </Text>
           </View>
           <View style={etStyles.divider} />
@@ -1340,20 +2171,223 @@ const EndTripModal = ({ visible, trip, contactCount, onConfirm, onCancel }: EndT
 };
 
 const etStyles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(10,26,17,0.75)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 28 },
-  card: { width: '100%', backgroundColor: '#0E1F17', borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)' },
-  header: { paddingHorizontal: 20, paddingTop: 20, paddingBottom: 16, backgroundColor: '#142C1F' },
-  routeRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 5 },
-  routeTxt: { fontSize: 16, fontWeight: '800', color: '#FFFFFF', letterSpacing: -0.3, flex: 1 },
-  metaTxt: { fontSize: 12, color: 'rgba(255,255,255,0.45)', fontWeight: '500' },
-  divider: { height: 0.5, backgroundColor: 'rgba(255,255,255,0.08)' },
-  body: { paddingHorizontal: 20, paddingTop: 20, paddingBottom: 8 },
-  headline: { fontSize: 18, fontWeight: '700', color: '#FFFFFF', marginBottom: 8 },
-  subtext: { fontSize: 13, color: 'rgba(255,255,255,0.5)', lineHeight: 19 },
-  confirmBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#1A6B4A', marginHorizontal: 20, marginTop: 20, borderRadius: 12, paddingVertical: 14 },
-  confirmTxt: { fontSize: 15, fontWeight: '700', color: '#FFFFFF' },
-  cancelLink: { alignItems: 'center', paddingVertical: 16 },
-  cancelLinkTxt: { fontSize: 13, color: 'rgba(255,255,255,0.35)', fontWeight: '500' },
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(8,24,18,0.72)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 22,
+  },
+  card: {
+    width: '100%',
+    maxWidth: 520,
+    backgroundColor: '#071D12',
+    borderRadius: 28,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    shadowColor: '#000000',
+    shadowOpacity: 0.28,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 8,
+  },
+  header: { paddingHorizontal: 28, paddingTop: 28, paddingBottom: 24, backgroundColor: '#10381F' },
+  routeRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
+  routeTxt: { fontSize: 22, lineHeight: 30, fontWeight: '900', color: '#FFFFFF', flex: 1 },
+  routeArrow: { fontWeight: '900', color: '#FFFFFF' },
+  metaTxt: { fontSize: 16, lineHeight: 22, color: 'rgba(255,255,255,0.48)', fontWeight: '700' },
+  divider: { height: 1, backgroundColor: 'rgba(255,255,255,0.04)' },
+  body: { paddingHorizontal: 28, paddingTop: 34, paddingBottom: 20 },
+  headline: { fontSize: 26, lineHeight: 34, fontWeight: '900', color: '#FFFFFF', marginBottom: 14 },
+  subtext: { fontSize: 18, color: 'rgba(255,255,255,0.52)', lineHeight: 26, fontWeight: '600' },
+  confirmBtn: {
+    minHeight: 70,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    backgroundColor: '#1F8058',
+    marginHorizontal: 28,
+    marginTop: 12,
+    borderRadius: 14,
+    paddingVertical: 18,
+  },
+  confirmTxt: { fontSize: 21, lineHeight: 28, fontWeight: '900', color: '#FFFFFF' },
+  cancelLink: { alignItems: 'center', paddingTop: 24, paddingBottom: 28 },
+  cancelLinkTxt: { fontSize: 16, color: 'rgba(255,255,255,0.38)', fontWeight: '800' },
+});
+
+const sosCountdownStyles = StyleSheet.create({
+  overlay: {
+    flex: 1,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#191C1E',
+  },
+  alertTop: { alignItems: 'center', gap: 8, marginBottom: 24 },
+  alertTitle: {
+    fontSize: 32,
+    lineHeight: 40,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    textTransform: 'uppercase',
+    letterSpacing: 1.2,
+    textAlign: 'center',
+  },
+  alertSub: { fontSize: 16, lineHeight: 24, fontWeight: '500', color: 'rgba(255,255,255,0.78)', textAlign: 'center' },
+  countWrap: {
+    width: 256,
+    height: 256,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 32,
+  },
+  pulseRing: {
+    position: 'absolute',
+    width: 224,
+    height: 224,
+    borderRadius: 112,
+    borderWidth: 2,
+    borderColor: '#BA1A1A',
+  },
+  outerRing: {
+    width: 256,
+    height: 256,
+    borderRadius: 128,
+    borderWidth: 12,
+    borderColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  progressRing: {
+    position: 'absolute',
+    width: 256,
+    height: 256,
+    borderRadius: 128,
+    borderWidth: 12,
+    borderColor: '#BA1A1A',
+  },
+  innerRing: {
+    width: 192,
+    height: 192,
+    borderRadius: 96,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.12)',
+  },
+  countNumber: { fontSize: 96, lineHeight: 104, fontWeight: '900', color: '#BA1A1A' },
+  countLabel: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.62)',
+    textTransform: 'uppercase',
+    letterSpacing: 2,
+  },
+  locationCard: {
+    width: '100%',
+    maxWidth: 520,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    marginBottom: 32,
+  },
+  locationIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 8,
+    backgroundColor: 'rgba(186,26,26,0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  locationCopy: { flex: 1 },
+  locationLabel: {
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '800',
+    color: 'rgba(255,255,255,0.62)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+  locationValue: { marginTop: 3, fontSize: 14, lineHeight: 20, fontWeight: '700', color: '#FFFFFF' },
+  actionCluster: { width: '100%', maxWidth: 520, gap: 16 },
+  confirmBtn: {
+    height: 64,
+    borderRadius: 12,
+    backgroundColor: '#BA1A1A',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    shadowColor: '#BA1A1A',
+    shadowOpacity: 0.28,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 4,
+  },
+  confirmText: { fontSize: 24, lineHeight: 32, fontWeight: '800', color: '#FFFFFF' },
+  cancelBtn: {
+    height: 64,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cancelText: { fontSize: 18, lineHeight: 24, fontWeight: '800', color: '#FFFFFF' },
+  footerNote: {
+    maxWidth: 520,
+    marginTop: 32,
+    paddingHorizontal: 24,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.42)',
+    textAlign: 'center',
+  },
+  successRoot: {
+    flex: 1,
+    backgroundColor: '#F7F9FB',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  successIcon: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: '#4EDEA3',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 24,
+  },
+  successTitle: { fontSize: 32, lineHeight: 40, fontWeight: '800', color: '#191C1E', textAlign: 'center', marginBottom: 8 },
+  successText: {
+    maxWidth: 340,
+    fontSize: 14,
+    lineHeight: 22,
+    fontWeight: '500',
+    color: '#45464D',
+    textAlign: 'center',
+    marginBottom: 32,
+  },
+  returnBtn: {
+    minWidth: 240,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#000000',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 28,
+  },
+  returnBtnText: { fontSize: 14, lineHeight: 20, fontWeight: '800', color: '#FFFFFF' },
 });
 
 // ── Tab bar item ──────────────────────────────────────────────────────────────
@@ -1363,14 +2397,15 @@ interface TabBarItemProps {
   label: string;
   active?: boolean;
   dark?: boolean;
+  disabled?: boolean;
   onPress?: () => void;
 }
 
-const TabBarItem = ({ icon, label, active = false, dark = false, onPress }: TabBarItemProps) => (
-  <Pressable style={styles.tabItem} onPress={onPress}>
-    <Feather name={icon} size={22} color={active ? (dark ? colors.brand.mid : '#6B21A8') : (dark ? 'rgba(255,255,255,0.35)' : colors.brand.textSecondary)} />
+const TabBarItem = ({ icon, label, active = false, dark = false, disabled = false, onPress }: TabBarItemProps) => (
+  <Pressable style={[styles.tabItem, disabled && styles.lockedControl]} onPress={onPress} disabled={disabled}>
+    <Feather name={icon} size={22} color={disabled ? '#D1D5DB' : active ? (dark ? colors.brand.mid : '#6B21A8') : (dark ? 'rgba(255,255,255,0.35)' : colors.brand.textSecondary)} />
     {active && <View style={[styles.tabActiveLine, dark && styles.tabActiveLineDark]} />}
-    <Text style={[styles.tabLabel, active && (dark ? styles.tabLabelActiveDark : styles.tabLabelActive), !active && dark && styles.tabLabelInactiveDark]}>
+    <Text style={[styles.tabLabel, active && (dark ? styles.tabLabelActiveDark : styles.tabLabelActive), !active && dark && styles.tabLabelInactiveDark, disabled && styles.lockedText]}>
       {label}
     </Text>
   </Pressable>
@@ -1380,6 +2415,11 @@ const TabBarItem = ({ icon, label, active = false, dark = false, onPress }: TabB
 
 const styles = StyleSheet.create({
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.brand.bgWarm },
+
+  // Applied to any control that must be inert while an SOS is active — only
+  // "Cancel SOS" stays interactive during an active alert.
+  lockedControl: { opacity: 0.4 },
+  lockedText: { color: '#9CA3AF' },
 
   idleRoot: { flex: 1, backgroundColor: '#F6F7FA' },
   dashboardTop: { alignItems: 'center', paddingBottom: 20, backgroundColor: '#F6F7FA' },
@@ -1400,6 +2440,8 @@ const styles = StyleSheet.create({
     borderColor: '#FDE68A',
   },
   gpsBannerText: { flex: 1, fontSize: 12, color: '#92400E', fontWeight: '600' },
+  sosCancelBtn: { alignSelf: 'stretch', backgroundColor: colors.white, borderRadius: 10, paddingVertical: 10, alignItems: 'center', marginTop: 10, borderWidth: 1, borderColor: 'rgba(255,255,255,0.6)' },
+  sosCancelBtnText: { fontSize: 13, fontWeight: '700', color: colors.brand.sos },
 
   // Mode toggle
   modeRow: {
@@ -1445,7 +2487,7 @@ const styles = StyleSheet.create({
   modeTextActive: { color: colors.white },
   modeTextInactive: { color: '#111827' },
   alwaysOnText: { color: colors.white, fontSize: 11, fontWeight: '800' },
-  upgradeBadge: { backgroundColor: '#6B21A8', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 2 },
+  upgradeBadge: { backgroundColor: '#6B21A8', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 2, marginLeft: 4 },
   upgradeBadgeText: { fontSize: 8, fontWeight: '800', color: colors.white, letterSpacing: 0.3 },
   tripModePill: {},
   modeTripActive: { borderWidth: 2, borderColor: '#111827' },
@@ -1465,6 +2507,13 @@ const styles = StyleSheet.create({
   locationBadgeIcon: { width: 22, height: 22, borderRadius: 11, backgroundColor: '#E8F7F1', alignItems: 'center', justifyContent: 'center' },
   locationEyebrow: { fontSize: 8, color: '#6B7280', fontWeight: '800' },
   locationText: { fontSize: 11, color: '#111827', fontWeight: '800', marginTop: 1, maxWidth: 142 },
+  preciseFixBanner: {
+    position: 'absolute', top: 12, alignSelf: 'center',
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: 'rgba(17,24,39,0.85)', borderRadius: 20,
+    paddingVertical: 6, paddingHorizontal: 14,
+  },
+  preciseFixBannerText: { fontSize: 11, fontWeight: '700', color: colors.white },
   mapControls: { position: 'absolute', right: 13, bottom: 15, alignItems: 'center', gap: 9 },
   mapControlBtn: {
     width: 42, height: 42, borderRadius: 21, backgroundColor: colors.white,
@@ -1554,77 +2603,187 @@ const styles = StyleSheet.create({
 // ── Active trip styles ────────────────────────────────────────────────────────
 
 const atStyles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#F4F3EF' },
-  banner: { backgroundColor: '#1A6B4A', paddingHorizontal: 16, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  bannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  bannerDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#4ADE80' },
-  bannerTxt: { fontSize: 11, fontWeight: '600', color: 'rgba(255,255,255,0.9)' },
-  bannerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  bannerTimer: { fontSize: 11, color: 'rgba(255,255,255,0.6)', fontWeight: '500' },
-  bgChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 6, paddingVertical: 3, paddingHorizontal: 8 },
-  bgChipTxt: { fontSize: 10, color: 'rgba(255,255,255,0.8)', fontWeight: '500' },
-  sosBanner: { backgroundColor: '#C0392B', paddingHorizontal: 16, paddingVertical: 7, flexDirection: 'row', alignItems: 'center', gap: 7 },
-  sosBannerDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#FFFFFF', flexShrink: 0 },
-  sosBannerTxt: { fontSize: 11, fontWeight: '700', color: '#FFFFFF', flex: 1 },
-  sosBannerTime: { fontSize: 11, color: 'rgba(255,255,255,0.7)' },
-  routeHdr: { backgroundColor: '#FFFFFF', paddingHorizontal: 17, paddingTop: 11, paddingBottom: 12, borderBottomWidth: 0.5, borderBottomColor: '#EEECE6' },
-  routeText: { fontSize: 19, fontWeight: '800', color: '#1A1A1A', letterSpacing: -0.5, marginBottom: 2 },
-  routeMeta: { fontSize: 11, color: '#9C9A92' },
+  root: { flex: 1, backgroundColor: '#F8F8FF' },
+  header: {
+    height: 64,
+    backgroundColor: '#F8F8FF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#C6C6CD',
+    paddingHorizontal: 16,
+    justifyContent: 'center',
+  },
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  backBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerTitle: { fontSize: 18, lineHeight: 24, fontWeight: '700', color: '#111827' },
   scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: 13, paddingTop: 11, gap: 9 },
-  statRow: { flexDirection: 'row', gap: 7 },
-  statBox: { flex: 1, backgroundColor: '#FFFFFF', borderRadius: 12, paddingVertical: 10, paddingHorizontal: 5, alignItems: 'center', borderWidth: 0.5, borderColor: '#EEECE6' },
-  statVal: { fontSize: 17, fontWeight: '800', color: '#1A1A1A', letterSpacing: -0.5 },
-  statKey: { fontSize: 10, color: '#9C9A92', marginTop: 2 },
-  card: { backgroundColor: '#FFFFFF', borderRadius: 14, paddingVertical: 12, paddingHorizontal: 14, borderWidth: 0.5, borderColor: '#EEECE6' },
-  cardLbl: { fontSize: 10, fontWeight: '700', color: '#9C9A92', letterSpacing: 0.7, textTransform: 'uppercase', marginBottom: 9 },
-  locRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4, borderBottomWidth: 0.5, borderBottomColor: '#F4F3EF' },
-  locRowLast: { borderBottomWidth: 0 },
-  locKey: { fontSize: 11, color: '#9C9A92' },
-  locVal: { fontSize: 11, color: '#1A1A1A', fontWeight: '500' },
-  locWait: { fontSize: 13, color: '#B4B2A9', fontStyle: 'italic', marginBottom: 5 },
-  locNote: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 6 },
-  locNoteTxt: { fontSize: 11, color: '#B4B2A9' },
-  alertRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 5, borderBottomWidth: 0.5, borderBottomColor: '#F4F3EF' },
-  alertRowLast: { borderBottomWidth: 0 },
-  alertKey: { fontSize: 11, color: '#9C9A92' },
-  alertVal: { fontSize: 11, fontWeight: '600', color: '#1A1A1A' },
-  alertValGreen: { color: '#1D9E75' },
-  nrRow: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 5, borderBottomWidth: 0.5, borderBottomColor: '#F4F3EF' },
-  nrRowLast: { borderBottomWidth: 0 },
-  nrName: { fontSize: 12, fontWeight: '500', color: '#1A1A1A', flex: 1 },
-  nrBadge: { backgroundColor: '#EFF9F4', borderRadius: 6, paddingVertical: 2, paddingHorizontal: 7, borderWidth: 0.5, borderColor: '#B8E8D0' },
-  nrBadgeTxt: { fontSize: 10, color: '#0F6E56', fontWeight: '600' },
-  sbTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
-  sbLeft: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  sbDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#1D9E75' },
-  sbTitle: { fontSize: 13, fontWeight: '600', color: '#1A1A1A' },
-  sbPill: { backgroundColor: '#EFF9F4', borderRadius: 20, paddingVertical: 3, paddingHorizontal: 8, borderWidth: 0.5, borderColor: '#B8E8D0' },
-  sbPillTxt: { fontSize: 10, color: '#0F6E56', fontWeight: '600' },
-  emptyCircleTxt: { fontSize: fontSizes.caption, color: colors.brand.primary, fontWeight: '600' },
-  ciRow: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 6, borderBottomWidth: 0.5, borderBottomColor: '#F4F3EF' },
-  ciRowLast: { borderBottomWidth: 0, paddingBottom: 0 },
-  ciAv: { width: 28, height: 28, borderRadius: 14, justifyContent: 'center', alignItems: 'center', flexShrink: 0 },
-  ciAvTxt: { fontSize: 9, fontWeight: '700' },
-  ciInfo: { flex: 1 },
-  ciName: { fontSize: 12, fontWeight: '600', color: '#1A1A1A' },
-  ciRel: { fontSize: 10, color: '#9C9A92' },
-  ciStatus: { fontSize: 10, color: '#1D9E75', fontWeight: '500' },
-  overflowRow: { flexDirection: 'row', alignItems: 'center', paddingTop: 7, borderTopWidth: 0.5, borderTopColor: '#F4F3EF', marginTop: 2 },
-  stackedAvatars: { flexDirection: 'row' },
-  stackedAv: { width: 22, height: 22, borderRadius: 11, borderWidth: 1.5, borderColor: '#FFFFFF', marginRight: -5, justifyContent: 'center', alignItems: 'center', flexShrink: 0 },
-  stackedAvTxt: { fontSize: 8, fontWeight: '700' },
-  moreLbl: { fontSize: 11, color: '#9C9A92', marginLeft: 12 },
-  moreLblBold: { color: '#1A6B4A', fontWeight: '600' },
-  sosBtn: { backgroundColor: '#C0392B', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 15, flexDirection: 'row', alignItems: 'center', gap: 13 },
-  sosIconCircle: { width: 38, height: 38, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 19, justifyContent: 'center', alignItems: 'center', flexShrink: 0 },
-  sosTextBlock: { flex: 1 },
-  sosTitle: { fontSize: 14, fontWeight: '800', color: '#FFFFFF' },
-  sosSub: { fontSize: 10, color: 'rgba(255,255,255,0.65)', marginTop: 2 },
-  cancelBtn: { backgroundColor: '#FEF2F2', borderRadius: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 0.5, borderColor: '#F7C1C1' },
-  cancelTxt: { fontSize: 12, color: '#A32D2D', fontWeight: '600' },
-  endBtn: { backgroundColor: '#FFFFFF', borderRadius: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 0.5, borderColor: '#EEECE6' },
-  endTxt: { fontSize: 12, color: '#9C9A92', fontWeight: '500' },
+  scrollContent: { paddingHorizontal: 16, paddingTop: 0, gap: 24 },
+  mapPanel: {
+    height: 324,
+    marginHorizontal: -16,
+    borderRadius: 0,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#C6C6CD',
+    backgroundColor: '#ECEEF0',
+    shadowColor: '#111827',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
+  },
+  mapImage: { ...StyleSheet.absoluteFillObject, width: '100%', height: '100%' },
+  mapInfoControls: { position: 'absolute', right: 16, top: '50%', gap: 10, transform: [{ translateY: -47 }] },
+  mapInfoIconBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    shadowColor: '#111827',
+    shadowOpacity: 0.14,
+    shadowRadius: 7,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
+  },
+  mapInfoIconBtnActive: {
+    backgroundColor: '#4B0082',
+    borderColor: '#4B0082',
+  },
+  mapInfoPanel: {
+    position: 'absolute',
+    top: '50%',
+    right: 68,
+    maxWidth: 238,
+    minHeight: 62,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#C6C6CD',
+    backgroundColor: 'rgba(255,255,255,0.93)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    shadowColor: '#111827',
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
+  },
+  mapInfoText: { flex: 1 },
+  mapInfoLabel: {
+    fontSize: 11,
+    lineHeight: 16,
+    letterSpacing: 0.7,
+    textTransform: 'uppercase',
+    fontWeight: '700',
+    color: '#45464D',
+  },
+  mapInfoValue: { fontSize: 14, lineHeight: 20, color: '#191C1E', fontWeight: '700', marginTop: 2 },
+  preciseFixBanner: {
+    position: 'absolute', top: 12, alignSelf: 'center',
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: 'rgba(17,24,39,0.85)', borderRadius: 20,
+    paddingVertical: 6, paddingHorizontal: 14,
+  },
+  preciseFixBannerText: { fontSize: 11, fontWeight: '700', color: colors.white },
+  statGrid: { flexDirection: 'row', gap: 16 },
+  statCard: {
+    flex: 1,
+    minHeight: 126,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#C6C6CD',
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    shadowColor: '#111827',
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  statLabel: {
+    marginTop: 8,
+    fontSize: 11,
+    lineHeight: 16,
+    letterSpacing: 0.7,
+    textTransform: 'uppercase',
+    fontWeight: '700',
+    color: '#45464D',
+    textAlign: 'center',
+  },
+  statValue: { marginTop: 4, fontSize: 20, lineHeight: 28, fontWeight: '800', color: '#111827', textAlign: 'center' },
+  actionStack: { gap: 16 },
+  arrivedBtn: {
+    height: 52,
+    borderRadius: 12,
+    backgroundColor: '#4B0082',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    shadowColor: '#111827',
+    shadowOpacity: 0.16,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 3,
+  },
+  sosBtn: {
+    height: 52,
+    borderRadius: 12,
+    backgroundColor: '#BA1A1A',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    shadowColor: '#BA1A1A',
+    shadowOpacity: 0.22,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 3,
+  },
+  actionText: { fontSize: 18, lineHeight: 24, fontWeight: '800', color: '#FFFFFF' },
+  sosStatusCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#F7C1C1',
+    backgroundColor: '#FFF1F1',
+    padding: 14,
+    gap: 8,
+  },
+  sosStatusTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  sosPulse: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#BA1A1A' },
+  sosStatusTitle: { flex: 1, fontSize: 13, fontWeight: '800', color: '#93000A' },
+  sosStatusTime: { fontSize: 12, fontWeight: '700', color: '#93000A' },
+  sosStatusText: { fontSize: 12, fontWeight: '600', color: '#93000A' },
+  detailCard: { borderRadius: 12, backgroundColor: '#F2F4F6', paddingHorizontal: 16, paddingVertical: 4 },
+  detailRow: {
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderBottomWidth: 1,
+    borderBottomColor: '#C6C6CD',
+    gap: 12,
+  },
+  detailRowLast: { borderBottomWidth: 0 },
+  detailLeft: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 0 },
+  detailLabel: { fontSize: 12, lineHeight: 16, fontWeight: '700', letterSpacing: 0.5, color: '#45464D' },
+  detailValue: { flex: 1, textAlign: 'right', fontSize: 13, lineHeight: 20, fontWeight: '700', color: '#191C1E' },
+  liveWrap: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#4EDEA3' },
+  liveText: { fontSize: 13, lineHeight: 20, fontWeight: '800', color: '#005236' },
 });
 
 // ── Setup modal styles ────────────────────────────────────────────────────────
@@ -1661,7 +2820,7 @@ const smStyles = StyleSheet.create({
   // PIN
   pinDots: { flexDirection: 'row', gap: 16, marginBottom: 12 },
   pinDot: { width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: '#D1D5DB', backgroundColor: 'transparent' },
-  pinDotFilled: { backgroundColor: colors.brand.primary, borderColor: colors.brand.primary },
+  pinDotFilled: { backgroundColor: '#4B0082', borderColor: '#4B0082' },
   pinError: { fontSize: 12, color: colors.brand.sos, marginBottom: 8, textAlign: 'center' },
   numpad: { width: '100%', gap: 8, marginBottom: 12 },
   numpadRow: { flexDirection: 'row', gap: 8 },

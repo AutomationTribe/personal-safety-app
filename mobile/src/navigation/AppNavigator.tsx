@@ -9,6 +9,7 @@ import HomeScreen from '../screens/trip/HomeScreen';
 import CircleScreen from '../screens/circle/CircleScreen';
 import RoutesScreen from '../screens/routes/RoutesScreen';
 import TripDetailScreen from '../screens/routes/TripDetailScreen';
+import SOSDetailScreen from '../screens/sos/SOSDetailScreen';
 import SubscriptionScreen from '../screens/subscription/SubscriptionScreen';
 import DirectPaymentScreen from '../screens/subscription/DirectPaymentScreen';
 import TrialOfferScreen from '../screens/subscription/TrialOfferScreen';
@@ -27,6 +28,7 @@ export type AppStackParamList = {
   Circle: { openAddModal?: boolean } | undefined;
   Routes: undefined;
   TripDetail: { tripId: string };
+  SOSDetail: { sosId: string };
   Subscription: undefined;
   DirectPayment: { plan: 'basic' | 'elite' };
   TrialOffer: undefined;
@@ -56,6 +58,7 @@ const AppStack = ({ initialRoute }: AppStackProps) => (
     <AppStackNav.Screen name="Circle" component={CircleScreen} />
     <AppStackNav.Screen name="Routes" component={RoutesScreen} />
     <AppStackNav.Screen name="TripDetail" component={TripDetailScreen} />
+    <AppStackNav.Screen name="SOSDetail" component={SOSDetailScreen} />
     <AppStackNav.Screen name="Subscription" component={SubscriptionScreen} />
     <AppStackNav.Screen name="DirectPayment" component={DirectPaymentScreen} />
     <AppStackNav.Screen name="TrialOffer" component={TrialOfferScreen} />

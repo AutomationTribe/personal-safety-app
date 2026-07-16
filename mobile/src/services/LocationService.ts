@@ -4,7 +4,8 @@ import { supabase } from '../lib/supabase';
 import { checkIsOnline } from '../hooks/useNetworkStatus';
 
 export interface LocationPing {
-  tripId: string;
+  // null = Always Online ping, not tied to any trip.
+  tripId: string | null;
   lat: number;
   lng: number;
   accuracy: number | null;
@@ -20,6 +21,13 @@ export interface LocationPing {
 let _db: SQLite.SQLiteDatabase | null = null;
 let _trackingSubscription: Location.LocationSubscription | null = null;
 let _activeTripId: string | null = null;
+// Distinct from _activeTripId — Always Online tracking has no trip, but is
+// still "tracking" (captureAndQueue must not bail out).
+let _isTracking = false;
+// Optional live-position observer (e.g. the dashboard map) — piggybacks on
+// the single tracking watchPositionAsync subscription instead of running a
+// second GPS watcher just for display.
+let _positionListener: ((lat: number, lng: number) => void) | null = null;
 
 // Stationary detection state
 let _lastPingLat: number | null = null;
@@ -52,11 +60,13 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
 }
 
 async function insertPing(db: SQLite.SQLiteDatabase, ping: LocationPing): Promise<void> {
+  // location_pings_queue.trip_id is TEXT NOT NULL — store '' for Always
+  // Online pings (no trip) and translate back to null on read.
   await db.runAsync(
     `INSERT INTO location_pings_queue
        (trip_id, lat, lng, accuracy, speed, heading, timestamp, source, synced)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-    [ping.tripId, ping.lat, ping.lng, ping.accuracy, ping.speed, ping.heading, ping.timestamp, ping.source],
+    [ping.tripId ?? '', ping.lat, ping.lng, ping.accuracy, ping.speed, ping.heading, ping.timestamp, ping.source],
   );
 }
 
@@ -83,7 +93,7 @@ async function ensurePermission(): Promise<void> {
 async function syncPingToSupabase(ping: LocationPing): Promise<boolean> {
   try {
     const { error } = await supabase.from('location_pings').insert({
-      trip_id: ping.tripId,
+      trip_id: ping.tripId, // nullable — Always Online pings have no trip
       // PostGIS geography via WKT string
       coords: `POINT(${ping.lng} ${ping.lat})`,
       accuracy: ping.accuracy,
@@ -106,7 +116,7 @@ async function syncPingToSupabase(ping: LocationPing): Promise<boolean> {
 
 // ── Stationary detection ─────────────────────────────────────────────────────
 
-function haversineMetres(lat1: number, lng1: number, lat2: number, lng2: number): number {
+export function haversineMetres(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6_371_000;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLng = ((lng2 - lng1) * Math.PI) / 180;
@@ -135,10 +145,20 @@ export function getIsStationary(): boolean {
   return _isStationary;
 }
 
+// ── Accuracy gate ────────────────────────────────────────────────────────────
+// Street-level accuracy requirement — readings worse than this (network/
+// cell-tower/WiFi triangulation fixes typically read 100m-1km+) are
+// discarded rather than shown on the map or written to location_pings.
+export const ACCURACY_THRESHOLD_METRES = 50;
+
+export function isAccurateEnough(accuracy: number | null): boolean {
+  return accuracy != null && accuracy <= ACCURACY_THRESHOLD_METRES;
+}
+
 // ── Core logic ───────────────────────────────────────────────────────────────
 
 async function captureAndQueue(): Promise<void> {
-  if (!_activeTripId) return;
+  if (!_isTracking) return;
 
   // When stationary, skip alternate pings to double effective interval
   if (_isStationary) {
@@ -146,11 +166,28 @@ async function captureAndQueue(): Promise<void> {
     if (_skipNextPing) return;
   }
 
-  _pingCount++;
-
   const position = await Location.getCurrentPositionAsync({
-    accuracy: Location.Accuracy.Balanced,
+    accuracy: Location.Accuracy.BestForNavigation,
+    // NOTE: `maximumAge` (reject cached readings older than 5s) was
+    // requested but is not a valid expo-location `LocationOptions` field —
+    // it's a browser Geolocation API concept this SDK doesn't expose. The
+    // accuracy gate below (`isAccurateEnough`) is the actual defense
+    // against stale/inaccurate readings being used.
+    timeInterval: 3000,
   });
+
+  // Reject low-accuracy (network/cell-tower) fixes outright — never write
+  // or sync a reading that isn't street-level accurate.
+  if (!isAccurateEnough(position.coords.accuracy)) {
+    if (__DEV__) {
+      console.log(
+        `[LocationService] Discarded low-accuracy fix: ${position.coords.accuracy?.toFixed(0) ?? '?'}m (threshold ${ACCURACY_THRESHOLD_METRES}m)`,
+      );
+    }
+    return;
+  }
+
+  _pingCount++;
 
   const { latitude: lat, longitude: lng } = position.coords;
   updateStationaryState(lat, lng);
@@ -161,7 +198,7 @@ async function captureAndQueue(): Promise<void> {
 
   if (__DEV__) {
     console.log(
-      `[LocationService] Ping #${_pingCount} | accuracy: ${position.coords.accuracy?.toFixed(0)}m | stationary: ${_isStationary} | queued: ${queued.length} | battery-mode: balanced`,
+      `[LocationService] Ping #${_pingCount} | accuracy: ${position.coords.accuracy?.toFixed(0)}m | stationary: ${_isStationary} | queued: ${queued.length} | mode: high-accuracy-gps`,
     );
   }
 
@@ -198,7 +235,12 @@ async function captureAndQueue(): Promise<void> {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-export async function startTracking(tripId: string, intervalMinutes: number): Promise<void> {
+/**
+ * Start writing pings on a battery-optimized cadence.
+ * Pass a tripId for Trip Mode, or null for Always Online (pings are still
+ * written — with trip_id = null — so Always Online works with no active trip).
+ */
+export async function startTracking(tripId: string | null, intervalMinutes: number): Promise<void> {
   // NOTE: True background location requires a dev build (not Expo Go)
   // expo-task-manager + expo-background-fetch handles the 30-min
   // heartbeat. Foreground tracking works in Expo Go.
@@ -211,6 +253,7 @@ export async function startTracking(tripId: string, intervalMinutes: number): Pr
 
   await ensurePermission();
   _activeTripId = tripId;
+  _isTracking = true;
   _pingCount = 0;
   _lastPingLat = null;
   _lastPingLng = null;
@@ -221,21 +264,33 @@ export async function startTracking(tripId: string, intervalMinutes: number): Pr
   // Capture immediately on start
   await captureAndQueue();
 
-  // Use watchPositionAsync with combined time + distance trigger.
-  // distanceInterval: 500 prevents pings when the traveller is stationary
-  // (stopped at a checkpoint, sleeping in the bus).
-  // Accuracy.Balanced uses cell tower + WiFi triangulation — far less
-  // battery drain than pure GPS (Accuracy.High).
+  // High-accuracy GPS mode — street-level fixes only. `intervalMinutes` is
+  // still accepted for API compatibility with existing callers, but the
+  // watcher itself now runs on a fixed 5s/10m trigger rather than the
+  // caller-supplied cadence (see flows/mobile/fixes/gps-accuracy.md).
+  void intervalMinutes;
   _trackingSubscription = await Location.watchPositionAsync(
     {
-      accuracy: Location.Accuracy.Balanced,
-      timeInterval: intervalMinutes * 60 * 1000,
-      distanceInterval: 500,
+      accuracy: Location.Accuracy.BestForNavigation,
+      timeInterval: 5000,
+      distanceInterval: 10,
     },
-    async () => {
+    async (pos) => {
+      if (isAccurateEnough(pos.coords.accuracy)) {
+        _positionListener?.(pos.coords.latitude, pos.coords.longitude);
+      }
       await captureAndQueue();
     },
   );
+}
+
+/**
+ * Subscribe to raw position updates from the single tracking watcher
+ * (e.g. to live-update a map) without spinning up a second GPS watcher.
+ * Pass null to unsubscribe.
+ */
+export function setPositionListener(listener: ((lat: number, lng: number) => void) | null): void {
+  _positionListener = listener;
 }
 
 export async function stopTracking(): Promise<void> {
@@ -244,6 +299,8 @@ export async function stopTracking(): Promise<void> {
     _trackingSubscription = null;
   }
   _activeTripId = null;
+  _isTracking = false;
+  _positionListener = null;
   _lastPingLat = null;
   _lastPingLng = null;
   _consecutiveStationaryCount = 0;
@@ -251,15 +308,48 @@ export async function stopTracking(): Promise<void> {
   _skipNextPing = false;
 }
 
+export function isTracking(): boolean {
+  return _isTracking;
+}
+
+export function getActiveTripId(): string | null {
+  return _activeTripId;
+}
+
+/**
+ * Attach a trip to an already-running Always Online session (general.md:
+ * "user can set a trip when in always on mode") — reuses the existing
+ * watcher rather than stopping/restarting it, so subsequent pings are
+ * tagged with this trip instead of trip_id = null.
+ */
+export function attachTrip(tripId: string): void {
+  _activeTripId = tripId;
+}
+
+/**
+ * Detach the trip from a still-running Always Online session when a trip
+ * ends but the user is still in Always Online mode — reverts subsequent
+ * pings to trip_id = null instead of stopping tracking outright.
+ */
+export function detachTrip(): void {
+  _activeTripId = null;
+}
+
 export async function getCurrentLocation(): Promise<LocationPing> {
   await ensurePermission();
 
   const position = await Location.getCurrentPositionAsync({
-    accuracy: Location.Accuracy.High,
+    accuracy: Location.Accuracy.BestForNavigation,
+    // NOTE: `maximumAge` (reject cached readings older than 5s) was
+    // requested but is not a valid expo-location `LocationOptions` field —
+    // it's a browser Geolocation API concept this SDK doesn't expose. The
+    // accuracy gate below (`isAccurateEnough`) is the actual defense
+    // against stale/inaccurate readings being used.
+    timeInterval: 3000,
   });
 
   return {
-    tripId: _activeTripId ?? '',
+    tripId: _activeTripId,
     lat: position.coords.latitude,
     lng: position.coords.longitude,
     accuracy: position.coords.accuracy,
@@ -269,6 +359,50 @@ export async function getCurrentLocation(): Promise<LocationPing> {
     source: 'gps',
     synced: false,
   };
+}
+
+/**
+ * Wait for a street-level-accurate GPS fix (accuracy <= ACCURACY_THRESHOLD_METRES)
+ * instead of returning whatever the first (possibly network-triangulated)
+ * reading happens to be. Used to centre a map only once a precise fix is
+ * available. Resolves early with the best fix seen if `timeoutMs` elapses
+ * without reaching the threshold; resolves `null` if no fix arrives at all.
+ */
+export async function getAccurateFix(timeoutMs = 20_000): Promise<Location.LocationObject | null> {
+  await ensurePermission();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let best: Location.LocationObject | null = null;
+    let sub: Location.LocationSubscription | undefined;
+
+    const finish = (result: Location.LocationObject | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sub?.remove();
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => finish(best), timeoutMs);
+
+    Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 3000, distanceInterval: 5 },
+      (pos) => {
+        if (best === null || (pos.coords.accuracy ?? Infinity) < (best.coords.accuracy ?? Infinity)) {
+          best = pos;
+        }
+        if (isAccurateEnough(pos.coords.accuracy)) {
+          finish(pos);
+        }
+      },
+    )
+      .then((s) => {
+        sub = s;
+        if (settled) sub.remove();
+      })
+      .catch(() => finish(null));
+  });
 }
 
 export async function getQueuedPings(): Promise<LocationPing[]> {
@@ -286,7 +420,7 @@ export async function getQueuedPings(): Promise<LocationPing[]> {
   }>(`SELECT * FROM location_pings_queue WHERE synced = 0 ORDER BY timestamp ASC`);
 
   return rows.map((r) => ({
-    tripId: r.trip_id,
+    tripId: r.trip_id.length > 0 ? r.trip_id : null,
     lat: r.lat,
     lng: r.lng,
     accuracy: r.accuracy,
@@ -314,7 +448,7 @@ export async function getLastPing(): Promise<LocationPing | null> {
 
   if (!row) return null;
   return {
-    tripId: row.trip_id,
+    tripId: row.trip_id.length > 0 ? row.trip_id : null,
     lat: row.lat,
     lng: row.lng,
     accuracy: row.accuracy,
@@ -345,7 +479,7 @@ export async function flushQueue(): Promise<{ synced: number; failed: number }> 
 
   for (const row of rows) {
     const ping: LocationPing = {
-      tripId: row.trip_id,
+      tripId: row.trip_id.length > 0 ? row.trip_id : null,
       lat: row.lat,
       lng: row.lng,
       accuracy: row.accuracy,

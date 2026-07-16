@@ -1,0 +1,313 @@
+<!DOCTYPE html><html lang="en" class="light" style=""><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=block" rel="stylesheet"><script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script><script id="tailwind-config">try{
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "surface-container-highest": "#e0e3e5",
+                    "secondary-fixed-dim": "#b4c5ff",
+                    "surface-bright": "#f7f9fb",
+                    "secondary": "#0051d5",
+                    "on-primary-fixed": "#131b2e",
+                    "inverse-primary": "#bec6e0",
+                    "background": "#f7f9fb",
+                    "error-container": "#ffdad6",
+                    "surface-container-lowest": "#ffffff",
+                    "on-tertiary-fixed": "#002113",
+                    "on-secondary": "#ffffff",
+                    "tertiary": "#000000",
+                    "on-surface-variant": "#45464d",
+                    "on-background": "#191c1e",
+                    "surface": "#f7f9fb",
+                    "primary-fixed-dim": "#bec6e0",
+                    "on-primary": "#ffffff",
+                    "secondary-container": "#316bf3",
+                    "primary-fixed": "#dae2fd",
+                    "primary": "#000000",
+                    "tertiary-container": "#002113",
+                    "error": "#ba1a1a",
+                    "on-error": "#ffffff",
+                    "on-surface": "#191c1e",
+                    "surface-container-high": "#e6e8ea",
+                    "on-primary-fixed-variant": "#3f465c",
+                    "tertiary-fixed-dim": "#4edea3",
+                    "outline-variant": "#c6c6cd",
+                    "inverse-on-surface": "#eff1f3",
+                    "primary-container": "#131b2e",
+                    "inverse-surface": "#2d3133",
+                    "surface-variant": "#e0e3e5",
+                    "surface-dim": "#d8dadc",
+                    "secondary-fixed": "#dbe1ff",
+                    "on-tertiary-container": "#009668",
+                    "tertiary-fixed": "#6ffbbe",
+                    "on-secondary-fixed-variant": "#003ea8",
+                    "surface-container": "#eceef0",
+                    "on-error-container": "#93000a",
+                    "on-tertiary-fixed-variant": "#005236",
+                    "on-tertiary": "#ffffff",
+                    "surface-container-low": "#f2f4f6",
+                    "outline": "#76777d",
+                    "on-secondary-fixed": "#00174b",
+                    "on-primary-container": "#7c839b",
+                    "on-secondary-container": "#fefcff",
+                    "surface-tint": "#565e74"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "margin-mobile": "16px",
+                    "lg": "24px",
+                    "md": "16px",
+                    "xs": "4px",
+                    "xl": "32px",
+                    "gutter": "16px",
+                    "base": "8px",
+                    "sm": "8px",
+                    "margin-desktop": "32px"
+            },
+            "fontFamily": {
+                    "title-lg": ["Plus Jakarta Sans"],
+                    "body-md": ["Plus Jakarta Sans"],
+                    "headline-lg-mobile": ["Plus Jakarta Sans"],
+                    "label-lg": ["Plus Jakarta Sans"],
+                    "headline-sm": ["Plus Jakarta Sans"],
+                    "headline-md": ["Plus Jakarta Sans"],
+                    "headline-lg": ["Plus Jakarta Sans"],
+                    "body-lg": ["Plus Jakarta Sans"]
+            },
+            "fontSize": {
+                    "title-lg": ["18px", {"lineHeight": "24px", "fontWeight": "600"}],
+                    "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                    "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}],
+                    "label-lg": ["12px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600"}],
+                    "headline-sm": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+                    "headline-md": ["24px", {"lineHeight": "32px", "fontWeight": "600"}],
+                    "headline-lg": ["32px", {"lineHeight": "40px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                    "body-lg": ["16px", {"lineHeight": "24px", "fontWeight": "400"}]
+            }
+          },
+        },
+      }
+    }catch(_e){}</script><meta charset="utf-8"></head><body class="bg-surface text-on-surface font-body-md min-h-screen pb-32">
+<!-- Top AppBar -->
+<header class="w-full top-0 bg-surface flex items-center justify-between px-4 py-4 sticky z-50">
+<div class="flex items-center gap-4">
+<button class="active:scale-95 duration-150 p-2 hover:bg-surface-container-high rounded-full transition-colors">
+<span class="material-symbols-outlined text-secondary" data-icon="arrow_back" data-original-icon="arrow_back">arrow_back</span>
+</button>
+<h1 class="font-headline-sm text-headline-sm font-bold text-on-surface">SOS Event Details</h1>
+</div>
+<button class="active:scale-95 duration-150 p-2 hover:bg-surface-container-high rounded-full transition-colors">
+<span class="material-symbols-outlined text-secondary" data-icon="search">search</span>
+</button>
+</header>
+<main class="max-w-2xl mx-auto space-y-6 mt-4">
+<!-- 1. Event Summary -->
+<section class="bg-surface-container-lowest rounded-xl p-6 border border-outline-variant flex flex-col items-center text-center">
+<div class="w-20 h-20 bg-error-container rounded-full flex items-center justify-center mb-4">
+<span class="material-symbols-outlined text-error text-5xl" style="font-variation-settings: 'FILL' 1;" data-icon="sos">sos</span>
+</div>
+<h2 class="font-headline-md text-headline-md text-on-surface mb-1">SOS Alert Triggered</h2>
+<div class="flex items-center gap-2 mb-4">
+<span class="w-2 h-2 rounded-full bg-on-tertiary-container"></span>
+<span class="text-on-tertiary-container font-label-lg text-label-lg uppercase">Status: Resolved</span>
+</div>
+<div class="grid grid-cols-2 w-full gap-4 pt-4 border-t border-outline-variant">
+<div class="text-left">
+<p class="text-on-surface-variant font-label-lg text-label-lg uppercase mb-1">Date / Time</p>
+<p class="font-title-lg text-title-lg">Oct 24, 2:45 PM</p>
+</div>
+<div class="text-right">
+<p class="text-on-surface-variant font-label-lg text-label-lg uppercase mb-1">Duration</p>
+<p class="font-title-lg text-title-lg text-secondary">12m 43s</p>
+</div>
+</div>
+</section>
+<!-- 2. Location Map -->
+<section class="overflow-hidden border-outline-variant relative">
+<div class="h-64 w-full relative">
+<div class="w-full h-full bg-cover bg-center" data-alt="A highly detailed aerial satellite map view of a metropolitan city intersection during the daytime. The map displays crisp road lines, green park areas, and architectural silhouettes of buildings. In the center, a vibrant red SOS location pin stands out against the muted blue and grey tones of the city grid. The aesthetic is clean and professional, resembling a high-security monitoring interface with soft light and high clarity." style="background-image: url('https://lh3.googleusercontent.com/aida-public/AB6AXuC9oUOLkCJhxybSgCSehH8WQMrKxi-YW7G9sjq7oGFzDf9kQ0Oy6Y_SEJTRZ_g5bdLATz8yuU6gqj6trS3Z8e9woK8qy8Ty7v8fT9vhSNfRaGzpNnfdEib1gHDvr4mnXz-BMtRy2grK0pCXrzErqK7Lv4EWwKpWGdsEBGPZbXahmYCgv3EkUiVySHznMTS8G2oHnXMullL2xIbDNYE8D_61YBDZoUM5eKdpe5sAUHikwwHwYBi96-79gHdfqRUzm2cF89QyMM5m8c8')"></div>
+<div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
+<div class="w-8 h-8 bg-error rounded-full flex items-center justify-center pulse-marker border-2 border-white">
+<span class="material-symbols-outlined text-white text-sm" data-icon="location_on" style="font-variation-settings: 'FILL' 1;">location_on</span>
+</div>
+</div>
+</div>
+<div class="bg-surface-container-lowest p-4 flex justify-between items-center">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-secondary" data-icon="near_me">near_me</span>
+<div>
+<p class="font-body-md text-body-md font-bold">1284 Oakwood Ave, Seattle</p>
+<p class="text-on-surface-variant text-label-lg">Accuracy: ± 4 meters</p>
+</div>
+</div>
+<button class="bg-secondary-container text-on-secondary-container px-4 py-2 rounded-full font-label-lg text-label-lg active:scale-95 transition-transform">
+                    View on Map
+                </button>
+</div>
+</section>
+<!-- 3. Audio Recording -->
+<section class="bg-surface-container-lowest rounded-xl p-6 border border-outline-variant space-y-4">
+<div class="flex justify-between items-center">
+<h3 class="font-title-lg text-title-lg flex items-center gap-2">
+<span class="material-symbols-outlined text-secondary" data-icon="mic">mic</span>
+                    Incident Recording
+                </h3>
+<button class="text-secondary font-label-lg text-label-lg flex items-center gap-1 hover:opacity-80 transition-opacity">
+<span class="material-symbols-outlined text-sm" data-icon="download">download</span>
+                    Download
+                </button>
+</div>
+<div class="bg-surface-container-low rounded-lg p-4">
+<div class="flex items-center gap-4 mb-4">
+<button class="w-12 h-12 bg-secondary text-white rounded-full flex items-center justify-center active:scale-90 transition-transform" id="playPauseBtn">
+<span class="material-symbols-outlined" data-icon="play_arrow" style="font-variation-settings: 'FILL' 1;">play_arrow</span>
+</button>
+<div class="flex-1 space-y-2">
+<!-- Waveform Visualization -->
+<div class="h-10 flex items-end gap-[2px]">
+<div class="waveform-bar w-1 bg-secondary rounded-t" style="height: 40%"></div>
+<div class="waveform-bar w-1 bg-secondary rounded-t" style="height: 60%"></div>
+<div class="waveform-bar w-1 bg-secondary rounded-t" style="height: 30%"></div>
+<div class="waveform-bar w-1 bg-secondary rounded-t" style="height: 80%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 50%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 20%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 45%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 70%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 35%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 10%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 60%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 25%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 55%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 30%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 80%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 40%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 15%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 65%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 45%"></div>
+<div class="waveform-bar w-1 bg-outline-variant rounded-t" style="height: 20%"></div>
+</div>
+<div class="flex justify-between text-label-lg font-label-lg text-on-surface-variant">
+<span class="">0:45</span>
+<span class="">2:15</span>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- 4. Contacts Alerted -->
+<section class="bg-surface-container-lowest rounded-xl p-6 border border-outline-variant">
+<h3 class="font-title-lg text-title-lg mb-4 flex items-center gap-2">
+<span class="material-symbols-outlined text-secondary" data-icon="group">group</span>
+                Safety Circle Notified
+            </h3>
+<div class="space-y-4">
+<!-- Contact 1 -->
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-10 h-10 rounded-full bg-secondary-fixed flex items-center justify-center font-bold text-on-secondary-fixed">JD</div>
+<div>
+<p class="font-body-md font-bold">John Doe</p>
+<p class="text-on-surface-variant text-label-lg">Primary Contact</p>
+</div>
+</div>
+<div class="flex items-center gap-1.5 bg-tertiary-container/10 px-3 py-1 rounded-full text-on-tertiary-container font-label-lg text-label-lg">
+<span class="material-symbols-outlined text-[16px]" data-icon="check_circle" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+                        Acknowledged
+                    </div>
+</div>
+<!-- Contact 2 -->
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-10 h-10 rounded-full bg-surface-container-highest flex items-center justify-center font-bold text-on-surface-variant">AS</div>
+<div>
+<p class="font-body-md font-bold">Alice Smith</p>
+<p class="text-on-surface-variant text-label-lg">Family Member</p>
+</div>
+</div>
+<div class="flex items-center gap-1.5 bg-surface-container-high px-3 py-1 rounded-full text-on-surface-variant font-label-lg text-label-lg">
+<span class="material-symbols-outlined text-[16px]" data-icon="forward_to_inbox">forward_to_inbox</span>
+                        Notified
+                    </div>
+</div>
+</div>
+</section>
+<!-- 5. Incident Metadata -->
+<section class="grid grid-cols-1 md:grid-cols-3 gap-4">
+<div class="bg-surface-container-lowest p-4 rounded-xl border border-outline-variant">
+<p class="text-on-surface-variant font-label-lg text-label-lg uppercase mb-2">Signal Strength</p>
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-on-tertiary-container" data-icon="signal_cellular_4_bar">signal_cellular_4_bar</span>
+<span class="font-title-lg text-title-lg">Strong</span>
+</div>
+</div>
+<div class="bg-surface-container-lowest p-4 rounded-xl border border-outline-variant">
+<p class="text-on-surface-variant font-label-lg text-label-lg uppercase mb-2">Device Battery</p>
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-secondary" data-icon="battery_full">battery_full</span>
+<span class="font-title-lg text-title-lg">82%</span>
+</div>
+</div>
+<div class="bg-surface-container-lowest p-4 rounded-xl border border-outline-variant">
+<p class="text-on-surface-variant font-label-lg text-label-lg uppercase mb-2">Reference ID</p>
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-outline" data-icon="tag">tag</span>
+<span class="font-title-lg text-title-lg">SG-9283-A</span>
+</div>
+</div>
+</section>
+<!-- Report Issue Button -->
+<button class="w-full py-4 text-error font-title-lg text-title-lg border-2 border-error/20 rounded-xl hover:bg-error/5 transition-colors active:scale-95 duration-150 mb-8">
+            Report Inaccuracy or False Alarm
+        </button>
+</main>
+<!-- Navigation Shell -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 py-2 bg-surface-container shadow-lg rounded-t-xl">
+<a class="flex flex-col items-center justify-center text-on-surface-variant hover:opacity-80 active:scale-90 transition-transform" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span class="font-label-sm text-label-sm">Dashboard</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant hover:opacity-80 active:scale-90 transition-transform" href="#">
+<span class="material-symbols-outlined" data-icon="group">group</span>
+<span class="font-label-sm text-label-sm">Circle</span>
+</a>
+<a class="flex flex-col items-center justify-center active:scale-90 transition-transform" href="#" style="color: rgb(75, 0, 130);">
+<span class="material-symbols-outlined" data-icon="history" style="color: rgb(75, 0, 130);">history</span>
+<span class="font-label-sm text-label-sm">History</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant hover:opacity-80 active:scale-90 transition-transform" href="#">
+<span class="material-symbols-outlined" data-icon="person">person</span>
+<span class="font-label-sm text-label-sm">Profile</span>
+</a>
+</nav>
+<script class="">
+        // Simple Interaction logic
+        const playPauseBtn = document.getElementById('playPauseBtn');
+        let isPlaying = false;
+
+        playPauseBtn.addEventListener('click', () => {
+            isPlaying = !isPlaying;
+            const icon = playPauseBtn.querySelector('.material-symbols-outlined');
+            icon.textContent = isPlaying ? 'pause' : 'play_arrow';
+            
+            if (isPlaying) {
+                animateWaveform();
+            }
+        });
+
+        function animateWaveform() {
+            if (!isPlaying) return;
+            const bars = document.querySelectorAll('.waveform-bar');
+            bars.forEach(bar => {
+                const randomHeight = Math.floor(Math.random() * 80) + 10;
+                bar.style.height = randomHeight + '%';
+            });
+            setTimeout(animateWaveform, 200);
+        }
+    </script>
+
+</body></html>

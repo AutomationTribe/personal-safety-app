@@ -48,7 +48,7 @@ type Filter = 'all' | 'trips' | 'sos';
 
 export interface SOSEvent {
   id: string;
-  trip_id: string;
+  trip_id: string | null;
   user_id: string;
   triggered_at: string;
   delivery_method: 'internet' | 'sms' | 'both';
@@ -59,7 +59,18 @@ export interface SOSEvent {
   contacts_total: number;
   contacts_notified: number;
   created_at: string;
+  alert_level: 1 | 2;
+  trigger_type: 'manual' | 'accident' | 'trip_auto';
+  notified_contact_ids: string[];
+  battery_level: number | null;
+  network_type: string | null;
 }
+
+const TRIGGER_TYPE_LABEL: Record<SOSEvent['trigger_type'], string> = {
+  manual: 'Manual',
+  accident: 'Accident',
+  trip_auto: 'Trip auto-SOS',
+};
 
 type HistoryItem =
   | { kind: 'trip'; id: string; date: string; trip: Trip }
@@ -104,6 +115,13 @@ function formatTime(iso: string): string {
     minute: '2-digit',
     hour12: true,
   });
+}
+
+function formatDateTimeShort(iso: string): string {
+  const d = new Date(iso);
+  const datePart = d.toLocaleDateString('en-NG', { day: 'numeric', month: 'short' });
+  const timePart = d.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', hour12: true });
+  return `${datePart}, ${timePart}`;
 }
 
 function weekdayName(iso: string): string {
@@ -282,39 +300,35 @@ const TripRow = React.memo(
 
 // ── SOS row (read-only) ───────────────────────────────────────────────────────
 
-const SOSRow = React.memo(({ sos }: { sos: SOSEvent }) => {
-  const dateStr = formatTripDate(sos.triggered_at);
-  const timeStr = formatTime(sos.triggered_at);
+interface SOSRowProps {
+  sos: SOSEvent;
+  tripLabel: string | null;
+  onPress: (sosId: string) => void;
+}
+
+const SOSRow = React.memo(({ sos, tripLabel, onPress }: SOSRowProps) => {
   const status: 'Resolved' | 'Cancelled' | 'Active' = sos.cancelled_at
     ? 'Cancelled'
     : sos.resolved_at
       ? 'Resolved'
       : 'Active';
-  const deliveryLabel =
-    sos.delivery_method === 'sms'
-      ? 'Sent via SMS'
-      : sos.delivery_method === 'internet'
-        ? 'Sent via internet'
-        : 'Sent via SMS + internet';
 
   return (
-    <View style={ss.card}>
+    <Pressable style={ss.card} onPress={() => onPress(sos.id)}>
       <View style={ss.cardInner}>
         <View style={ss.icon}>
           <Feather name="alert-triangle" size={16} color={H.red} />
         </View>
         <View style={ss.info}>
-          <View style={ss.titleRow}>
-            <Text style={ss.title}>Emergency SOS Triggered</Text>
-            <Text style={ss.time}>{timeStr}</Text>
-          </View>
-          <View style={ss.locRow}>
-            <Feather name="map-pin" size={11} color={H.sub} />
-            <Text style={ss.meta}>{dateStr}  ·  {deliveryLabel}</Text>
-          </View>
+          <Text style={ss.title}>{formatDateTimeShort(sos.triggered_at)}</Text>
           <View style={ss.badgeRow}>
-            <View style={ss.priorityBadge}>
-              <Text style={ss.priorityBadgeText}>PRIORITY HIGH</Text>
+            <View style={ss.triggerBadge}>
+              <Text style={ss.triggerBadgeText}>{TRIGGER_TYPE_LABEL[sos.trigger_type]}</Text>
+            </View>
+            <View style={[ss.badge, sos.alert_level === 1 ? ss.badgeLevel1 : ss.badgeLevel2]}>
+              <Text style={[ss.badgeText, sos.alert_level === 1 ? ss.badgeLevel1Text : ss.badgeLevel2Text]}>
+                {sos.alert_level === 1 ? '1st level' : '2nd level'}
+              </Text>
             </View>
             <View
               style={[
@@ -322,6 +336,7 @@ const SOSRow = React.memo(({ sos }: { sos: SOSEvent }) => {
                 status === 'Resolved' ? ss.badgeResolved : status === 'Cancelled' ? ss.badgeCancelled : ss.badgeActive,
               ]}
             >
+              {status === 'Active' && <View style={ss.activeDot} />}
               <Text
                 style={[
                   ss.badgeText,
@@ -332,9 +347,16 @@ const SOSRow = React.memo(({ sos }: { sos: SOSEvent }) => {
               </Text>
             </View>
           </View>
+          {tripLabel && (
+            <View style={ss.locRow}>
+              <Feather name="map-pin" size={11} color={H.sub} />
+              <Text style={ss.meta} numberOfLines={1}>During trip: {tripLabel}</Text>
+            </View>
+          )}
         </View>
+        <Feather name="chevron-right" size={16} color={H.sub} />
       </View>
-    </View>
+    </Pressable>
   );
 });
 
@@ -346,57 +368,64 @@ const ss = StyleSheet.create({
     borderLeftColor: H.red,
     borderWidth: 0.5,
     borderColor: H.hairline,
-    marginBottom: 10,
+    marginBottom: 9,
   },
   cardInner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    paddingVertical: 12,
+    paddingVertical: 9,
     paddingHorizontal: 13,
-    gap: 10,
+    gap: 9,
   },
   icon: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
+    width: 31,
+    height: 31,
+    borderRadius: 9,
     backgroundColor: H.redLight,
     justifyContent: 'center',
     alignItems: 'center',
     flexShrink: 0,
-    marginTop: 2,
+    marginTop: 1,
   },
-  info: { flex: 1, gap: 6 },
-  titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  info: { flex: 1, gap: 4 },
   title: {
     fontSize: 13,
     fontWeight: '700',
     color: H.ink,
   },
-  time: { fontSize: 11, color: H.sub },
   locRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   meta: {
     fontSize: 11,
     color: H.sub,
+    flexShrink: 1,
   },
-  badgeRow: { flexDirection: 'row', gap: 6 },
-  priorityBadge: {
-    backgroundColor: H.red,
+  badgeRow: { flexDirection: 'row', gap: 5, flexWrap: 'wrap' },
+  triggerBadge: {
+    backgroundColor: '#FEF3E2',
+    borderWidth: 0.5,
+    borderColor: '#F5DDAA',
     paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingVertical: 2,
     borderRadius: 6,
   },
-  priorityBadgeText: {
-    fontSize: 9,
-    fontWeight: '800',
-    color: '#fff',
-    letterSpacing: 0.3,
+  triggerBadgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#92600C',
   },
   badge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
     paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingVertical: 2,
     borderRadius: 6,
     borderWidth: 0.5,
   },
+  badgeLevel1: { backgroundColor: H.redLight, borderColor: '#F9C6C6' },
+  badgeLevel1Text: { color: '#A32D2D' },
+  badgeLevel2: { backgroundColor: '#FEF3E2', borderColor: '#F5DDAA' },
+  badgeLevel2Text: { color: '#92600C' },
   badgeResolved: { backgroundColor: H.greenLight, borderColor: '#C6E8D5' },
   badgeResolvedText: { color: H.greenText },
   badgeCancelled: { backgroundColor: '#F4F3EF', borderColor: '#E0DED8' },
@@ -404,6 +433,7 @@ const ss = StyleSheet.create({
   badgeActive: { backgroundColor: H.redLight, borderColor: '#F9C6C6' },
   badgeActiveText: { color: '#A32D2D' },
   badgeText: { fontSize: 10, fontWeight: '600' },
+  activeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#BA1A1A' },
 });
 
 // ── Delete sheet ──────────────────────────────────────────────────────────────
@@ -569,8 +599,7 @@ const EMPTY_STATE: Record<Filter, { icon: React.ComponentProps<typeof Feather>['
   },
   sos: {
     icon: 'shield',
-    title: 'No SOS alerts',
-    sub: "You haven't triggered an SOS. That's a good thing.",
+    title: 'No SOS alerts. Stay safe.',
   },
 };
 
@@ -669,6 +698,12 @@ const RoutesScreen = () => {
     [historyItems]
   );
 
+  const tripsById = useMemo(() => {
+    const map = new Map<string, Trip>();
+    trips.forEach((t) => map.set(t.id, t));
+    return map;
+  }, [trips]);
+
   const exitSelectMode = useCallback(() => {
     setSelectMode(false);
     setSelectedIds([]);
@@ -693,6 +728,10 @@ const RoutesScreen = () => {
 
   const handleView = useCallback((tripId: string) => {
     navigation.navigate('TripDetail', { tripId });
+  }, [navigation]);
+
+  const handleViewSOS = useCallback((sosId: string) => {
+    navigation.navigate('SOSDetail', { sosId });
   }, [navigation]);
 
   const confirmDeleteSingle = async () => {
@@ -739,7 +778,11 @@ const RoutesScreen = () => {
   };
 
   const renderItem = useCallback(({ item }: { item: HistoryItem }) => {
-    if (item.kind === 'sos') return <SOSRow sos={item.sos} />;
+    if (item.kind === 'sos') {
+      const linkedTrip = item.sos.trip_id ? tripsById.get(item.sos.trip_id) : undefined;
+      const tripLabel = linkedTrip ? `${linkedTrip.origin ?? '—'} → ${linkedTrip.destination ?? '—'}` : null;
+      return <SOSRow sos={item.sos} tripLabel={tripLabel} onPress={handleViewSOS} />;
+    }
     return (
       <TripRow
         trip={item.trip}
@@ -752,7 +795,7 @@ const RoutesScreen = () => {
         onDeleteRequest={handleDeleteRequest}
       />
     );
-  }, [selectMode, selectedIds, handleToggleSelect, handleEnterSelectMode, handleView, handleDeleteRequest]);
+  }, [selectMode, selectedIds, handleToggleSelect, handleEnterSelectMode, handleView, handleDeleteRequest, tripsById, handleViewSOS]);
 
   const emptyState = query.trim()
     ? { icon: 'search' as const, title: `No results for "${query.trim()}"`, sub: undefined }
@@ -1090,24 +1133,25 @@ const rs = StyleSheet.create({
     backgroundColor: '#F1EFF7',
     borderRadius: 12,
     padding: 3,
+    minHeight: 50,
   },
   filterTab: {
     flex: 1,
     alignItems: 'center',
-    paddingVertical: 8,
+    justifyContent: 'center',
     borderRadius: 10,
   },
   filterTabActive: {
     backgroundColor: H.navy,
   },
   filterLabel: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: 14,
+    fontWeight: '800',
     color: '#6B6A73',
   },
   filterLabelActive: {
     color: '#fff',
-    fontWeight: '700',
+    fontWeight: '900',
   },
 
   // FlatList
@@ -1134,7 +1178,7 @@ const rs = StyleSheet.create({
   },
   actionView: {
     width: 62,
-    backgroundColor: '#1A6B4A',
+    backgroundColor: H.purple,
     justifyContent: 'center',
     alignItems: 'center',
     gap: 3,
@@ -1160,9 +1204,9 @@ const rs = StyleSheet.create({
   cardInner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    paddingVertical: 12,
+    paddingVertical: 9,
     paddingHorizontal: 13,
-    gap: 10,
+    gap: 9,
   },
 
   // Checkbox — shown only in select mode
@@ -1185,21 +1229,21 @@ const rs = StyleSheet.create({
 
   // Trip icon
   tripIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
+    width: 31,
+    height: 31,
+    borderRadius: 9,
     backgroundColor: H.blueLight,
     justifyContent: 'center',
     alignItems: 'center',
     flexShrink: 0,
-    marginTop: 2,
+    marginTop: 1,
   },
   tripIconSOS: {
     backgroundColor: H.redLight,
   },
 
   // Info
-  info: { flex: 1, gap: 6 },
+  info: { flex: 1, gap: 4 },
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   tripTitle: {
     flex: 1,
@@ -1217,10 +1261,10 @@ const rs = StyleSheet.create({
     fontSize: 11,
     color: H.sub,
   },
-  badgeRow: { flexDirection: 'row', gap: 6 },
+  badgeRow: { flexDirection: 'row', gap: 5 },
   badge: {
     paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingVertical: 2,
     borderRadius: 6,
     borderWidth: 0.5,
   },

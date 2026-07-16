@@ -97,28 +97,28 @@ describe('Permission handling', () => {
 // ── startTracking ─────────────────────────────────────────────────────────────
 
 describe('startTracking', () => {
-  it('calls watchPositionAsync with Accuracy.Balanced', async () => {
+  it('calls watchPositionAsync with Accuracy.BestForNavigation', async () => {
     await startTracking('trip-1', 30);
     expect(mockLocation.watchPositionAsync).toHaveBeenCalledWith(
-      expect.objectContaining({ accuracy: Location.Accuracy.Balanced }),
+      expect.objectContaining({ accuracy: Location.Accuracy.BestForNavigation }),
       expect.any(Function),
     );
     await stopTracking();
   });
 
-  it('uses timeInterval of intervalMinutes * 60 * 1000', async () => {
+  it('uses a fixed timeInterval of 5000ms regardless of intervalMinutes', async () => {
     await startTracking('trip-1', 30);
     expect(mockLocation.watchPositionAsync).toHaveBeenCalledWith(
-      expect.objectContaining({ timeInterval: 30 * 60 * 1000 }),
+      expect.objectContaining({ timeInterval: 5000 }),
       expect.any(Function),
     );
     await stopTracking();
   });
 
-  it('uses distanceInterval of 500', async () => {
+  it('uses distanceInterval of 10', async () => {
     await startTracking('trip-1', 30);
     expect(mockLocation.watchPositionAsync).toHaveBeenCalledWith(
-      expect.objectContaining({ distanceInterval: 500 }),
+      expect.objectContaining({ distanceInterval: 10 }),
       expect.any(Function),
     );
     await stopTracking();
@@ -154,10 +154,10 @@ describe('stopTracking', () => {
 // ── getCurrentLocation ────────────────────────────────────────────────────────
 
 describe('getCurrentLocation', () => {
-  it('uses Accuracy.High', async () => {
+  it('uses Accuracy.BestForNavigation', async () => {
     await getCurrentLocation();
     expect(mockLocation.getCurrentPositionAsync).toHaveBeenCalledWith(
-      expect.objectContaining({ accuracy: Location.Accuracy.High }),
+      expect.objectContaining({ accuracy: Location.Accuracy.BestForNavigation }),
     );
   });
 
@@ -222,15 +222,47 @@ describe('flushQueue', () => {
 
 // ── Battery-mode logging ──────────────────────────────────────────────────────
 
-describe('Battery-mode logging', () => {
-  it('logs battery-mode: balanced when __DEV__ is true', async () => {
+describe('Accuracy-mode logging', () => {
+  it('logs mode: high-accuracy-gps when __DEV__ is true', async () => {
     const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     await startTracking('trip-1', 30);
 
     const calls = consoleSpy.mock.calls.map((args) => String(args[0]));
-    expect(calls.some((c) => c.includes('battery-mode: balanced'))).toBe(true);
+    expect(calls.some((c) => c.includes('mode: high-accuracy-gps'))).toBe(true);
 
     consoleSpy.mockRestore();
+    await stopTracking();
+  });
+});
+
+// ── Accuracy gate ─────────────────────────────────────────────────────────────
+
+describe('Accuracy gate', () => {
+  it('discards a fix worse than 50m and does not write to SQLite', async () => {
+    mockRunAsync.mockClear();
+    mockLocation.getCurrentPositionAsync.mockResolvedValueOnce({
+      coords: { latitude: 6.5244, longitude: 3.3792, accuracy: 250, speed: 0, heading: 0 },
+      timestamp: Date.now(),
+    } as never);
+    await startTracking('trip-1', 30);
+    expect(mockRunAsync).not.toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO location_pings_queue'),
+      expect.any(Array),
+    );
+    await stopTracking();
+  });
+
+  it('accepts a fix at or better than 50m', async () => {
+    mockRunAsync.mockClear();
+    mockLocation.getCurrentPositionAsync.mockResolvedValueOnce({
+      coords: { latitude: 6.5244, longitude: 3.3792, accuracy: 50, speed: 0, heading: 0 },
+      timestamp: Date.now(),
+    } as never);
+    await startTracking('trip-1', 30);
+    expect(mockRunAsync).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO location_pings_queue'),
+      expect.any(Array),
+    );
     await stopTracking();
   });
 });

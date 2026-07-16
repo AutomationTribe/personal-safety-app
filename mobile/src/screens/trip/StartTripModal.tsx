@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,10 +12,11 @@ import {
   View,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
+import * as Location from 'expo-location';
 import { supabase } from '../../lib/supabase';
 import { getContacts, TrustedContact } from '../../services/CircleService';
-import { startTracking } from '../../services/LocationService';
-import { colors, fontSizes, spacing } from '../../styles/tokens';
+import { startTracking, attachTrip, isTracking } from '../../services/LocationService';
+import { colors } from '../../styles/tokens';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -29,9 +31,13 @@ export interface Trip {
   expected_duration_minutes: number | null;
   expected_stops: number;
   max_stop_duration_minutes: number;
+  destination_lat: number | null;
+  destination_lng: number | null;
   contact_ids: string[];
   created_at: string;
 }
+
+const DEFAULT_STOP_THRESHOLD_MINUTES = 10;
 
 interface Props {
   visible: boolean;
@@ -39,60 +45,77 @@ interface Props {
   onTripStarted: (trip: Trip) => void;
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+type NotifyMode = 'all' | 'select';
 
-const STOP_OPTIONS = [0, 1, 2, 3, 4, 5] as const;
-const DURATION_OPTIONS = [15, 30, 45, 60] as const;
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3001';
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 const StartTripModal = ({ visible, onClose, onTripStarted }: Props) => {
-  const originRef = useRef<TextInput>(null);
   const destRef = useRef<TextInput>(null);
 
-  const [origin, setOrigin] = useState('');
   const [destination, setDestination] = useState('');
-  const [expectedStops, setExpectedStops] = useState(0);
-  const [maxStopMinutes, setMaxStopMinutes] = useState(30);
+  const [expectedDuration, setExpectedDuration] = useState('');
+  const [stopThreshold, setStopThreshold] = useState(String(DEFAULT_STOP_THRESHOLD_MINUTES));
   const [contacts, setContacts] = useState<TrustedContact[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [notifyMode, setNotifyMode] = useState<NotifyMode>('all');
+  const [autoSos, setAutoSos] = useState(true);
   const [loadingContacts, setLoadingContacts] = useState(true);
   const [starting, setStarting] = useState(false);
-  const [errors, setErrors] = useState<{ origin?: string; destination?: string; contacts?: string }>({});
+  const [errors, setErrors] = useState<{ destination?: string; contacts?: string; duration?: string; stopThreshold?: string }>({});
 
-  // Reset and load contacts each time modal opens
   useEffect(() => {
     if (!visible) return;
-    setOrigin('');
     setDestination('');
-    setExpectedStops(0);
-    setMaxStopMinutes(30);
+    setExpectedDuration('');
+    setStopThreshold(String(DEFAULT_STOP_THRESHOLD_MINUTES));
+    setNotifyMode('all');
+    setAutoSos(true);
     setErrors({});
     setStarting(false);
     setLoadingContacts(true);
     getContacts().then((data) => {
       setContacts(data);
-      setSelectedIds(new Set(data.map((c) => c.id))); // pre-check all
+      setSelectedIds(new Set(data.map((c) => c.id)));
       setLoadingContacts(false);
     });
-    setTimeout(() => originRef.current?.focus(), 250);
+    setTimeout(() => destRef.current?.focus(), 250);
   }, [visible]);
-
-  // ── Validation ────────────────────────────────────────────────────────────
 
   function validate(): boolean {
     const next: typeof errors = {};
-    if (!origin.trim() || origin.trim().length < 2) next.origin = 'Enter your starting point.';
-    if (!destination.trim() || destination.trim().length < 2) next.destination = 'Enter your destination.';
-    if (selectedIds.size === 0) next.contacts = 'Select at least one contact to alert.';
+    if (!destination.trim() || destination.trim().length < 2) {
+      next.destination = 'Enter your destination.';
+    }
+    const durationNum = Number(expectedDuration);
+    if (!expectedDuration.trim() || !Number.isFinite(durationNum) || durationNum <= 0) {
+      next.duration = 'Enter expected duration in minutes.';
+    }
+    const thresholdNum = Number(stopThreshold);
+    if (!stopThreshold.trim() || !Number.isFinite(thresholdNum) || thresholdNum <= 0) {
+      next.stopThreshold = 'Enter a stop threshold in minutes.';
+    }
+    if (selectedIds.size === 0) {
+      next.contacts = 'Select at least one contact to alert.';
+    }
     setErrors(next);
     return Object.keys(next).length === 0;
   }
 
-  // ── Handlers ──────────────────────────────────────────────────────────────
+  const setAllContacts = () => {
+    setNotifyMode('all');
+    setSelectedIds(new Set(contacts.map((c) => c.id)));
+    setErrors((e) => ({ ...e, contacts: undefined }));
+  };
+
+  const setCustomContacts = () => {
+    setNotifyMode('select');
+    setErrors((e) => ({ ...e, contacts: undefined }));
+  };
 
   const toggleContact = (id: string) => {
+    setNotifyMode('select');
     setSelectedIds((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
@@ -107,19 +130,37 @@ const StartTripModal = ({ visible, onClose, onTripStarted }: Props) => {
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
-
       if (!session?.user) throw new Error('Not authenticated.');
 
+      // Best-effort geocode for arrival detection — a failed/ambiguous
+      // geocode just means arrival detection won't fire for this trip;
+      // it never blocks trip creation.
+      let destinationLat: number | null = null;
+      let destinationLng: number | null = null;
+      try {
+        const [geo] = await Location.geocodeAsync(destination.trim());
+        if (geo) {
+          destinationLat = geo.latitude;
+          destinationLng = geo.longitude;
+        }
+      } catch {
+        // non-fatal
+      }
+
+      const origin = 'Current location';
       const { data, error } = await supabase
         .from('trips')
         .insert({
           user_id: session.user.id,
           status: 'active',
-          origin: origin.trim(),
+          origin,
           destination: destination.trim(),
+          destination_lat: destinationLat,
+          destination_lng: destinationLng,
           started_at: new Date().toISOString(),
-          expected_stops: expectedStops,
-          max_stop_duration_minutes: maxStopMinutes,
+          expected_duration_minutes: Number(expectedDuration),
+          expected_stops: 0,
+          max_stop_duration_minutes: Number(stopThreshold),
           contact_ids: Array.from(selectedIds),
         })
         .select()
@@ -129,10 +170,16 @@ const StartTripModal = ({ visible, onClose, onTripStarted }: Props) => {
 
       const trip = data as Trip;
 
-      await startTracking(trip.id, 30);
+      // Always Online may already be tracking (general.md: "user can set a
+      // trip when in always on mode") — attach this trip to the running
+      // session instead of trying to start a second one.
+      if (isTracking()) {
+        attachTrip(trip.id);
+      } else {
+        await startTracking(trip.id, 30);
+      }
 
-      // Fire and forget — notify contacts in background
-      if (session?.access_token) {
+      if (session.access_token) {
         fetch(`${BACKEND_URL}/api/v1/trips/notify-start`, {
           method: 'POST',
           headers: {
@@ -141,8 +188,10 @@ const StartTripModal = ({ visible, onClose, onTripStarted }: Props) => {
           },
           body: JSON.stringify({
             tripId: trip.id,
-            origin: origin.trim(),
+            origin,
             destination: destination.trim(),
+            expectedDurationMinutes: Number(expectedDuration),
+            autoSos,
             contactIds: Array.from(selectedIds),
           }),
         }).catch(() => {});
@@ -151,15 +200,11 @@ const StartTripModal = ({ visible, onClose, onTripStarted }: Props) => {
       onTripStarted(trip);
       onClose();
     } catch (err) {
-      setErrors({ origin: err instanceof Error ? err.message : 'Could not start trip. Try again.' });
+      setErrors({ destination: err instanceof Error ? err.message : 'Could not add trip. Try again.' });
     } finally {
       setStarting(false);
     }
   };
-
-  // ── Derived ───────────────────────────────────────────────────────────────
-
-  const durationLabel = (min: number) => min === 60 ? '1 hour' : `${min} min`;
 
   return (
     <Modal
@@ -171,311 +216,442 @@ const StartTripModal = ({ visible, onClose, onTripStarted }: Props) => {
     >
       <KeyboardAvoidingView
         style={styles.overlay}
-        behavior="padding"
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
-          <Pressable style={styles.dismissArea} onPress={onClose} />
-          <View style={styles.sheet}>
-            {/* Handle */}
-            <View style={styles.handleRow}>
-              <View style={styles.handle} />
+        <Pressable style={styles.dismissArea} onPress={onClose} />
+        <View style={styles.sheet}>
+          <View style={styles.handle} />
+          <View style={styles.headerRow}>
+            <Text style={styles.headerTitle}>Add a Trip</Text>
+            <Pressable onPress={onClose} hitSlop={12} style={styles.closeBtn}>
+              <Feather name="x" size={24} color="#111827" />
+            </Pressable>
+          </View>
+
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.fieldGroup}>
+              <Text style={styles.label}>Destination</Text>
+              <View style={[styles.inputBox, errors.destination && styles.inputError]}>
+                <Feather name="map-pin" size={22} color="#374151" />
+                <TextInput
+                  ref={destRef}
+                  style={styles.input}
+                  value={destination}
+                  onChangeText={(text) => {
+                    setDestination(text);
+                    setErrors((e) => ({ ...e, destination: undefined }));
+                  }}
+                  placeholder="Where are you going?"
+                  placeholderTextColor="#6B7280"
+                  autoCapitalize="words"
+                  returnKeyType="next"
+                  editable={!starting}
+                />
+              </View>
+              {errors.destination ? <Text style={styles.errorText}>{errors.destination}</Text> : null}
             </View>
 
-            {/* Header */}
-            <View style={styles.headerRow}>
-              <Text style={styles.headerTitle}>Start a trip</Text>
-              <Pressable
-                style={({ pressed }) => [styles.closeBtn, pressed && styles.closeBtnPressed]}
-                onPress={onClose}
-                hitSlop={8}
-              >
-                <Feather name="x" size={16} color={colors.brand.textSecondary} />
-              </Pressable>
+            <View style={styles.durationRow}>
+              <View style={[styles.fieldGroup, styles.durationField]}>
+                <Text style={styles.label}>Expected duration (min)</Text>
+                <View style={[styles.inputBox, errors.duration && styles.inputError]}>
+                  <Feather name="clock" size={20} color="#374151" />
+                  <TextInput
+                    style={styles.input}
+                    value={expectedDuration}
+                    onChangeText={(text) => {
+                      setExpectedDuration(text.replace(/[^0-9]/g, ''));
+                      setErrors((e) => ({ ...e, duration: undefined }));
+                    }}
+                    placeholder="e.g. 90"
+                    placeholderTextColor="#6B7280"
+                    keyboardType="number-pad"
+                    returnKeyType="next"
+                    editable={!starting}
+                  />
+                </View>
+                {errors.duration ? <Text style={styles.errorText}>{errors.duration}</Text> : null}
+              </View>
+
+              <View style={[styles.fieldGroup, styles.durationField]}>
+                <Text style={styles.label}>Stop threshold (min)</Text>
+                <View style={[styles.inputBox, errors.stopThreshold && styles.inputError]}>
+                  <Feather name="pause-circle" size={20} color="#374151" />
+                  <TextInput
+                    style={styles.input}
+                    value={stopThreshold}
+                    onChangeText={(text) => {
+                      setStopThreshold(text.replace(/[^0-9]/g, ''));
+                      setErrors((e) => ({ ...e, stopThreshold: undefined }));
+                    }}
+                    placeholder={String(DEFAULT_STOP_THRESHOLD_MINUTES)}
+                    placeholderTextColor="#6B7280"
+                    keyboardType="number-pad"
+                    returnKeyType="done"
+                    editable={!starting}
+                  />
+                </View>
+                {errors.stopThreshold ? <Text style={styles.errorText}>{errors.stopThreshold}</Text> : null}
+              </View>
             </View>
 
-            <View style={styles.divider} />
-
-            <ScrollView
-              style={styles.scroll}
-              contentContainerStyle={styles.scrollContent}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
-            >
-              {/* ── Row 1: From / To ── */}
-              <View style={styles.row}>
-                <View style={styles.rowHalf}>
-                  <Text style={styles.label}>From <Text style={styles.required}>*</Text></Text>
-                  <View style={[styles.inputWrapper, errors.origin && styles.inputError]}>
-                    <TextInput
-                      ref={originRef}
-                      style={styles.input}
-                      value={origin}
-                      onChangeText={(t) => { setOrigin(t); setErrors((e) => ({ ...e, origin: undefined })); }}
-                      placeholder="Lagos"
-                      placeholderTextColor="#C5C3BB"
-                      autoCapitalize="words"
-                      returnKeyType="next"
-                      onSubmitEditing={() => destRef.current?.focus()}
-                      editable={!starting}
-                    />
-                  </View>
-                  {errors.origin ? <Text style={styles.errorText}>{errors.origin}</Text> : null}
-                </View>
-
-                <View style={styles.rowHalf}>
-                  <Text style={styles.label}>To <Text style={styles.required}>*</Text></Text>
-                  <View style={[styles.inputWrapper, errors.destination && styles.inputError]}>
-                    <TextInput
-                      ref={destRef}
-                      style={styles.input}
-                      value={destination}
-                      onChangeText={(t) => { setDestination(t); setErrors((e) => ({ ...e, destination: undefined })); }}
-                      placeholder="Abuja"
-                      placeholderTextColor="#C5C3BB"
-                      autoCapitalize="words"
-                      returnKeyType="done"
-                      editable={!starting}
-                    />
-                  </View>
-                  {errors.destination ? <Text style={styles.errorText}>{errors.destination}</Text> : null}
-                </View>
+            <View style={styles.fieldGroup}>
+              <Text style={styles.label}>Notify Circle</Text>
+              <View style={styles.notifyRow}>
+                <Pressable
+                  style={[styles.notifyBtn, notifyMode === 'all' && styles.notifyBtnActive]}
+                  onPress={setAllContacts}
+                  disabled={starting || loadingContacts}
+                >
+                  <Feather name="users" size={19} color={notifyMode === 'all' ? '#E91E63' : '#374151'} />
+                  <Text style={[styles.notifyText, notifyMode === 'all' && styles.notifyTextActive]}>All</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.notifyBtn, notifyMode === 'select' && styles.notifyBtnActive]}
+                  onPress={setCustomContacts}
+                  disabled={starting}
+                >
+                  <Feather name="user-plus" size={20} color={notifyMode === 'select' ? '#E91E63' : '#374151'} />
+                  <Text style={[styles.notifyText, notifyMode === 'select' && styles.notifyTextActive]}>Select</Text>
+                </Pressable>
               </View>
+              {errors.contacts ? <Text style={styles.errorText}>{errors.contacts}</Text> : null}
+            </View>
 
-              {/* ── Row 2: Stops / Max stop duration ── */}
-              <View style={styles.row}>
-                {/* Estimated stops */}
-                <View style={styles.rowHalf}>
-                  <Text style={styles.label}>Estimated stops</Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
-                    <View style={styles.chipRow}>
-                      {STOP_OPTIONS.map((n) => (
-                        <Pressable
-                          key={n}
-                          style={[styles.chip, expectedStops === n && styles.chipActive]}
-                          onPress={() => setExpectedStops(n)}
-                          disabled={starting}
-                        >
-                          <Text style={[styles.chipText, expectedStops === n && styles.chipTextActive]}>
-                            {n === 5 ? '5+' : `${n}`}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                  </ScrollView>
-                </View>
-
-                {/* Max stop duration */}
-                <View style={styles.rowHalf}>
-                  <Text style={styles.label}>Max stop</Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
-                    <View style={styles.chipRow}>
-                      {DURATION_OPTIONS.map((min) => (
-                        <Pressable
-                          key={min}
-                          style={[styles.chip, maxStopMinutes === min && styles.chipActive]}
-                          onPress={() => setMaxStopMinutes(min)}
-                          disabled={starting}
-                        >
-                          <Text style={[styles.chipText, maxStopMinutes === min && styles.chipTextActive]}>
-                            {durationLabel(min)}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                  </ScrollView>
-                </View>
-              </View>
-
-              {/* ── Contact selector ── */}
-              <View style={styles.fieldGroup}>
-                <Text style={styles.label}>Alert contacts <Text style={styles.required}>*</Text></Text>
+            {notifyMode === 'select' ? (
+              <View style={styles.contactsPanel}>
                 {loadingContacts ? (
-                  <ActivityIndicator color="#4B0082" style={{ marginTop: 8 }} />
+                  <ActivityIndicator color="#4B0082" />
                 ) : contacts.length === 0 ? (
-                  <View style={styles.emptyContacts}>
-                    <Text style={styles.emptyContactsText}>
-                      Add contacts to your circle first.
-                    </Text>
-                  </View>
+                  <Text style={styles.emptyContactsText}>Add contacts to your circle first.</Text>
                 ) : (
-                  <View style={styles.contactsList}>
-                    {contacts.map((c) => {
-                      const selected = selectedIds.has(c.id);
-                      return (
-                        <Pressable
-                          key={c.id}
-                          style={styles.contactRow}
-                          onPress={() => toggleContact(c.id)}
-                          disabled={starting}
-                        >
-                          <View style={[styles.checkbox, selected && styles.checkboxChecked]}>
-                            {selected && <Feather name="check" size={12} color={colors.white} />}
-                          </View>
-                          <View style={styles.contactAvatar}>
-                            <Text style={styles.contactAvatarText}>
-                              {c.name.split(' ').slice(0, 2).map((w) => w[0]?.toUpperCase() ?? '').join('')}
-                            </Text>
-                          </View>
-                          <View style={styles.contactInfo}>
-                            <Text style={styles.contactName}>{c.name}</Text>
-                            <Text style={styles.contactSub}>{c.relationship}</Text>
-                          </View>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
+                  contacts.map((contact) => {
+                    const selected = selectedIds.has(contact.id);
+                    return (
+                      <Pressable
+                        key={contact.id}
+                        style={styles.contactRow}
+                        onPress={() => toggleContact(contact.id)}
+                        disabled={starting}
+                      >
+                        <View style={[styles.checkbox, selected && styles.checkboxChecked]}>
+                          {selected ? <Feather name="check" size={12} color="#FFFFFF" /> : null}
+                        </View>
+                        <Text style={styles.contactName} numberOfLines={1}>{contact.name}</Text>
+                        <Text style={styles.contactMeta} numberOfLines={1}>{contact.relationship}</Text>
+                      </Pressable>
+                    );
+                  })
                 )}
-                {errors.contacts ? <Text style={styles.errorText}>{errors.contacts}</Text> : null}
               </View>
+            ) : null}
 
-              {/* ── Start button ── */}
+            <View style={styles.autoRow}>
+              <View>
+                <Text style={styles.autoTitle}>Auto SOS</Text>
+                <Text style={styles.autoSub}>trigger sos automatically</Text>
+              </View>
               <Pressable
-                style={({ pressed }) => [
-                  styles.startBtn,
-                  starting && styles.startBtnDisabled,
-                  pressed && !starting && styles.startBtnPressed,
-                ]}
-                onPress={handleStart}
+                style={[styles.switchTrack, autoSos && styles.switchTrackOn]}
+                onPress={() => setAutoSos((value) => !value)}
                 disabled={starting}
               >
-                {starting ? (
-                  <ActivityIndicator color={colors.white} />
-                ) : (
-                  <Text style={styles.startBtnText}>Start trip  →</Text>
-                )}
+                <View style={[styles.switchKnob, autoSos && styles.switchKnobOn]} />
               </Pressable>
-            </ScrollView>
-          </View>
+            </View>
+
+            <View style={styles.tripModeCard}>
+              <View style={styles.tripModeAccent} />
+              <Feather name="shield" size={24} color="#5B00A5" />
+              <View style={styles.tripModeTextBlock}>
+                <Text style={styles.tripModeTitle}>Trip Mode</Text>
+                <Text style={styles.tripModeSub}>
+                  Safety contacts will be notified if you don't arrive by the ETA.
+                </Text>
+              </View>
+            </View>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.addBtn,
+                starting && styles.addBtnDisabled,
+                pressed && !starting && styles.addBtnPressed,
+              ]}
+              onPress={handleStart}
+              disabled={starting}
+            >
+              {starting ? (
+                <ActivityIndicator color={colors.white} />
+              ) : (
+                <>
+                  <Text style={styles.addBtnText}>Add Trip</Text>
+                  <Feather name="arrow-right" size={24} color="#FFFFFF" />
+                </>
+              )}
+            </Pressable>
+          </ScrollView>
+        </View>
       </KeyboardAvoidingView>
     </Modal>
   );
 };
 
-// ── Styles ─────────────────────────────────────────────────────────────────────
-
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: 'rgba(17,24,39,0.58)',
     justifyContent: 'flex-end',
   },
   dismissArea: { flex: 1 },
   sheet: {
-    backgroundColor: colors.white,
+    backgroundColor: '#FFFFFF',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    maxHeight: '92%',
+    maxHeight: '82%',
+    paddingTop: 16,
   },
-
-  handleRow: { alignItems: 'center', marginTop: 12, marginBottom: 4 },
-  handle: { width: 36, height: 3, borderRadius: 2, backgroundColor: 'rgba(0,0,0,0.1)' },
-
+  handle: {
+    alignSelf: 'center',
+    width: 28,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#C7C9D1',
+    marginBottom: 13,
+  },
   headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.gap20,
-    paddingVertical: spacing.gap12,
+    paddingHorizontal: 26,
+    marginBottom: 20,
   },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: colors.brand.textPrimary, letterSpacing: -0.2 },
+  headerTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#111827',
+  },
   closeBtn: {
-    width: 30, height: 30, borderRadius: 8,
-    backgroundColor: colors.brand.bgSurface,
-    justifyContent: 'center', alignItems: 'center',
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  closeBtnPressed: { opacity: 0.65 },
-  divider: { height: 0.5, backgroundColor: 'rgba(0,0,0,0.08)' },
-
   scroll: { flexGrow: 0 },
   scrollContent: {
-    paddingHorizontal: spacing.gap20,
-    paddingTop: spacing.gap16,
-    paddingBottom: spacing.gap32,
-    gap: spacing.gap16,
+    paddingHorizontal: 26,
+    paddingBottom: 33,
+    gap: 21,
   },
-
-  // Row layout
-  row: { flexDirection: 'row', gap: spacing.gap8 },
-  rowHalf: { flex: 1, gap: 6 },
-
-  // Fields
-  fieldGroup: { gap: 6 },
-  label: { fontSize: fontSizes.caption, fontWeight: '600', color: colors.brand.textSecondary },
-  required: { color: colors.brand.primary },
-  inputWrapper: {
-    height: spacing.inputHeight,
-    borderWidth: 0.5,
-    borderColor: 'rgba(0,0,0,0.12)',
-    borderRadius: spacing.inputRadius,
-    paddingHorizontal: spacing.gap12,
+  fieldGroup: { gap: 10 },
+  durationRow: { flexDirection: 'row', gap: 14 },
+  durationField: { flex: 1 },
+  label: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#3F3F46',
+  },
+  inputBox: {
+    height: 46,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: '#C7CDDB',
+    backgroundColor: '#EEF3FF',
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+  },
+  inputError: {
+    borderColor: '#DC2626',
+  },
+  input: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#111827',
+    paddingVertical: 0,
+  },
+  errorText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#DC2626',
+  },
+  notifyRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  notifyBtn: {
+    flex: 1,
+    height: 43,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#C7CDDB',
+    backgroundColor: '#EEF3FF',
+    flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.white,
+    gap: 8,
   },
-  inputError: { borderColor: colors.danger, borderWidth: 1 },
-  input: { color: colors.brand.textPrimary, fontSize: fontSizes.body },
-  errorText: { fontSize: fontSizes.small, color: colors.danger, marginTop: 2 },
-
-  // Chips
-  chipScroll: { marginTop: 4 },
-  chipRow: { flexDirection: 'row', gap: 6 },
-  chip: {
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 16,
-    backgroundColor: colors.brand.bgSurface,
+  notifyBtnActive: {
+    borderWidth: 2,
+    borderColor: '#E91E63',
   },
-  chipActive: { backgroundColor: colors.brand.primary },
-  chipText: { fontSize: 12, fontWeight: '600', color: colors.brand.textSecondary },
-  chipTextActive: { color: colors.white },
-
-  // Contacts
-  contactsList: {
-    borderWidth: 0.5,
-    borderColor: 'rgba(0,0,0,0.1)',
-    borderRadius: 12,
+  notifyText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#374151',
+  },
+  notifyTextActive: {
+    color: '#E91E63',
+  },
+  contactsPanel: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#D8DEEC',
+    backgroundColor: '#F8FAFF',
     overflow: 'hidden',
   },
   contactRow: {
+    minHeight: 42,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: spacing.gap12,
-    height: 44,
-    borderBottomWidth: 0.5,
-    borderBottomColor: 'rgba(0,0,0,0.07)',
-    gap: spacing.gap12,
+    paddingHorizontal: 12,
+    gap: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E9F3',
   },
   checkbox: {
-    width: 18, height: 18, borderRadius: 5,
-    borderWidth: 1.5, borderColor: 'rgba(0,0,0,0.2)',
-    justifyContent: 'center', alignItems: 'center',
-  },
-  checkboxChecked: { backgroundColor: colors.brand.primary, borderColor: colors.brand.primary },
-  contactAvatar: {
-    width: 28, height: 28, borderRadius: 14,
-    backgroundColor: colors.brand.light,
-    justifyContent: 'center', alignItems: 'center',
-  },
-  contactAvatarText: { fontSize: 11, fontWeight: '700', color: colors.brand.primary },
-  contactInfo: { flex: 1 },
-  contactName: { fontSize: fontSizes.caption, fontWeight: '600', color: colors.brand.textPrimary },
-  contactSub: { fontSize: fontSizes.small, color: colors.brand.textSecondary },
-  emptyContacts: {
-    padding: spacing.gap12,
-    backgroundColor: colors.brand.bgSurface,
-    borderRadius: 10,
-  },
-  emptyContactsText: { fontSize: fontSizes.caption, color: colors.brand.textSecondary },
-
-  // Start button
-  startBtn: {
-    height: spacing.buttonHeight,
-    borderRadius: 13,
-    backgroundColor: colors.brand.primary,
-    justifyContent: 'center',
+    width: 18,
+    height: 18,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: '#9CA3AF',
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  startBtnDisabled: { opacity: 0.5 },
-  startBtnPressed: { opacity: 0.85 },
-  startBtnText: { color: colors.white, fontSize: fontSizes.button, fontWeight: '700' },
+  checkboxChecked: {
+    backgroundColor: '#4B0082',
+    borderColor: '#4B0082',
+  },
+  contactName: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#111827',
+  },
+  contactMeta: {
+    maxWidth: 100,
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#6B7280',
+  },
+  emptyContactsText: {
+    padding: 12,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#6B7280',
+    textAlign: 'center',
+  },
+  autoRow: {
+    minHeight: 55,
+    borderRadius: 8,
+    backgroundColor: '#EEF3FF',
+    borderWidth: 1,
+    borderColor: '#D7DEEF',
+    paddingHorizontal: 13,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  autoTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#111827',
+  },
+  autoSub: {
+    marginTop: 2,
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#111827',
+  },
+  switchTrack: {
+    width: 40,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#CBD5E1',
+    padding: 3,
+    justifyContent: 'center',
+  },
+  switchTrackOn: {
+    backgroundColor: '#E91E63',
+  },
+  switchKnob: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#FFFFFF',
+  },
+  switchKnobOn: {
+    transform: [{ translateX: 16 }],
+  },
+  tripModeCard: {
+    minHeight: 69,
+    borderRadius: 8,
+    backgroundColor: '#E6EEFF',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 18,
+    paddingRight: 12,
+    gap: 14,
+    overflow: 'hidden',
+  },
+  tripModeAccent: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 4,
+    backgroundColor: '#5B00A5',
+  },
+  tripModeTextBlock: { flex: 1 },
+  tripModeTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#111827',
+  },
+  tripModeSub: {
+    marginTop: 2,
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#111827',
+    lineHeight: 14,
+  },
+  addBtn: {
+    height: 48,
+    borderRadius: 8,
+    backgroundColor: '#5B008F',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    shadowColor: '#111827',
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 5,
+  },
+  addBtnDisabled: { opacity: 0.6 },
+  addBtnPressed: { opacity: 0.86 },
+  addBtnText: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '700',
+  },
 });
 
 export default StartTripModal;

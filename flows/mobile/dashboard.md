@@ -50,17 +50,29 @@ Tapping opens `Linking.openSettings()`. Banner disappears once permission is res
 
 ## User Mode Toggle
 
-Two pills at the top of the scroll area.
+Single sliding pill at the top of the scroll area (tap either half, or drag
+the thumb) — see `flows/mobile/fixes/trip-mode-user-mode.md` for the fix that
+guarantees this toggle is fully decoupled from the "start a trip" form.
 
 | Pill | Basic Plan | Elite / Trial |
 |---|---|---|
-| Always On | Greyed, "Upgrade" badge | Toggleable, teal border active |
+| Always On | Greyed, lock icon + "ELITE" badge — tap opens `UpgradeSheet`, mode unchanged | Toggleable, `colors.brand.primary` fill when active |
 | Trip Mode | Active (default) | Toggleable |
 
 - Default: Trip Mode selected
-- Always On selected → starts foreground GPS watcher; map updates live
-- Persisted to `AsyncStorage` key `HADIN_USER_MODE` (`'always_on'` | `'trip'`)
-- Low battery (≤15%): pause always-on tracking, show battery banner
+- Toggle tap/drag calls `handleModeToggle` only — never opens `StartTripModal`
+  (that is a separate "+" control on the map, reachable independently)
+- Switching **to** Trip Mode stops any running tracking session — no pings
+  are written until the user explicitly starts a trip
+- Switching **to** Always On starts a foreground GPS watcher immediately
+  (`startTracking(null, 1)`); map updates live via the shared position
+  listener
+- Persisted to `AsyncStorage` key `` `HADIN_USER_MODE:<userId>` `` (namespaced
+  per user, not a single global key)
+- Restored on relaunch; Always Online only auto-resumes if the plan still
+  allows it (checked fresh, not cached)
+- Low battery (≤15%): pause always-on tracking, fire a local notification,
+  show "Tracking paused — tap to resume" banner; resumes automatically at >20%
 
 ---
 

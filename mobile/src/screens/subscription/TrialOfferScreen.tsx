@@ -18,7 +18,7 @@ type Props = {
   navigation: NativeStackNavigationProp<AppStackParamList, 'TrialOffer'>;
 };
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? '';
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3001';
 
 const TIMELINE = [
   { day: 'Today — Day 1', desc: 'Full access, no charge', filled: true },
