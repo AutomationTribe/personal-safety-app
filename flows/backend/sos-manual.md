@@ -75,17 +75,31 @@ skips the contacts/SMS/email loop entirely, never touches `trips.status`.
 ## Exact SMS text (and email body — identical)
 
 ```
-SOS alert from {userName}. His last know location is {lat}, {lng} ({mapsUrl}) - Hadin (https://hadin.app)
+SOS alert from {userName}. His last know location is {lat}, {lng} ({mapsUrl}) - Hadin (https://hadin.app). Tap to acknowledge: {ackUrl}
 ```
-where `{mapsUrl}` is `https://maps.google.com/?q={lat},{lng}`.
+where `{mapsUrl}` is `https://maps.google.com/?q={lat},{lng}` and `{ackUrl}`
+is `https://api.hadin.app/api/v1/sos/ack/{acknowledgement_token}` — a
+per-contact token from that contact's own `sos_notifications` row, so every
+recipient gets a distinct link tied to their own acknowledgement record.
 
-Example: `"SOS alert from Ada Obi. His last know location is 6.5244, 3.3792 (https://maps.google.com/?q=6.5244,3.3792) - Hadin (https://hadin.app)"`
-— 135 characters for a typical name, still inside a single SMS segment
-(160 chars) after `userName` is truncated to 20 chars (148 chars
-worst-case). Shows the raw coordinates *and* a tappable maps link *and* a
-link to hadin.app, per explicit approval of this exact wording. "His" is
-not gender-conditional — it's the literal copy specified for this pass,
-applied regardless of the user's actual gender.
+Example: `"SOS alert from Ada Obi. His last know location is 6.5244, 3.3792 (https://maps.google.com/?q=6.5244,3.3792) - Hadin (https://hadin.app). Tap to acknowledge: https://api.hadin.app/api/v1/sos/ack/3fa85f64-5717-4562-b3fc-2c963f66afa6"`
+— ~225 characters for a typical name, which spans 2 concatenated SMS
+segments (AT handles this automatically, ~2x per-recipient SMS cost) rather
+than the previous single-segment message. The pre-ack-link wording
+("SOS alert from... - Hadin (https://hadin.app)") is unchanged from the
+version explicitly approved earlier in this project — only the
+acknowledgement sentence was appended, not a full rewrite to the generic
+example text this feature's spec suggested. "His" is not gender-conditional
+— it's the literal copy specified for an earlier pass, applied regardless
+of the user's actual gender.
+
+**Every contact gets an ack link, platform user or not.** The original
+spec split this into "non-platform members get the SMS link, platform
+members acknowledge via push notification instead" — but FCM push
+infrastructure isn't wired up in this project (no `fcm_token` column on
+`profiles`, no push library installed), so per that spec's own fallback
+instruction, the SMS ack link is the universal acknowledgement path for
+every contact today, platform or not.
 
 ## 1st-level alert delivery
 
@@ -237,6 +251,80 @@ needed.
   same `POST /api/v1/sos` endpoint once connectivity returns
   (`SOSService.syncQueuedSOS()`) — from the backend's perspective this is
   indistinguishable from a normal, slightly-delayed trigger.
+
+## Circle acknowledgement (`sos_notifications`)
+
+New table, migration `016_sos_notifications.sql`: one row per contact per
+SOS event, snapshotting `contact_name`/`contact_phone` at notify time (so
+the record stays accurate even if the contact is later renamed/removed),
+plus `is_platform_user` (their phone matched a `profiles.phone`),
+`acknowledged_at`, `delivery_status` (`'sent' | 'delivered' | 'failed' |
+'acknowledged'` — `'delivered'` is defined but never set today, Africa's
+Talking's synchronous response doesn't give us a delivery receipt, only
+send-accepted-or-not), and a unique `acknowledgement_token` used to build
+each contact's personal ack link. RLS: the SOS event's owner can `SELECT`
+their own notifications; all writes go through the backend's service-role
+client (`POST /api/v1/sos` on insert, the two endpoints below on update) —
+no additional RLS policy needed for insert/update, per CLAUDE.md's
+"service role key ONLY in backend" rule. `ALTER PUBLICATION
+supabase_realtime ADD TABLE sos_notifications` was added to the migration
+(not in the original spec's SQL) since `SOSDetailScreen` subscribes to it.
+
+**Deviation from the given migration SQL**: the spec's `contact_id uuid
+REFERENCES contacts(id)` was changed to `REFERENCES trusted_contacts(id)`
+— there is no `contacts` table in this schema, circle contacts have always
+lived in `trusted_contacts` (see `flows/mobile/dashboard-add-circle-member.md`).
+
+**`sos_events.acknowledgement_token`**: added per the spec's "if not
+already present" instruction, but nothing in this pass reads or writes it
+— acknowledgement is tracked per-contact via
+`sos_notifications.acknowledgement_token`, not per-event. Kept as a
+harmless unused nullable column rather than skipping an explicit
+instruction; flagging in case a per-event (not per-contact) ack flow was
+actually intended elsewhere.
+
+### `GET /api/v1/sos/ack/:token`
+
+Public — no `requireAuth`. Reached by tapping the SMS ack link. Looks up
+`sos_notifications` by `acknowledgement_token`; 404s (HTML page) if not
+found. On a valid token, idempotently sets `acknowledged_at`/`delivery_status`
+(only on the first tap — repeat taps just re-render the same confirmation)
+and returns a plain inline-styled HTML page: "✓ Acknowledged — You have
+confirmed you received this SOS alert from Hadin Safety. Please check on
+{first name} immediately." No React/build step — the HTML is a template
+literal in `sos.ts`.
+
+### `POST /api/v1/sos/ack/platform`
+
+Authenticated (`requireAuth`). Body `{ sos_event_id }`. Matches the caller's
+own `profiles.phone` against `sos_notifications.contact_phone` for that
+event and marks it acknowledged the same way. **Built per spec but not
+currently reachable from any mobile screen** — see "FCM" below.
+
+## FCM push notifications — not wired up (TODO)
+
+Per the spec's own fallback instruction ("if FCM token infrastructure is
+not ready, implement the acknowledgement URL flow for ALL members via SMS
+link only, and add a TODO comment for FCM"): this project has no
+`fcm_token` column on `profiles`, no Firebase project configured, and no
+push library installed in `mobile/`. So:
+
+- Every contact — platform user or not — gets the same SMS ack link
+  (see "Exact SMS text" above). This is the only acknowledgement path
+  today.
+- `is_platform_user` is still computed and stored per SOS notification
+  (useful metadata, and required by the literal spec), but nothing acts on
+  it yet.
+- **TODO**: when FCM is wired up, send a push (`🚨 SOS Alert — {userName}`
+  / `{userName} needs help. Tap to view their location.`) to platform
+  contacts' FCM tokens after the `sos_notifications` insert in
+  `POST /api/v1/sos`, deep-linking to `SOSDetail` for that `sos_event_id`
+  on the *contact's* device. That screen would need a read-only mode (no
+  audio-delete/pin-cancel controls — those belong to the SOS owner only)
+  plus an "Acknowledge" button calling `POST /api/v1/sos/ack/platform`. None
+  of that mobile UI was built this pass — there's no existing "alerts sent
+  to me by others" screen to extend, and building one with no push trigger
+  to open it from would be dead code.
 
 ## Blocked / needs a decision
 

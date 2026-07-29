@@ -19,7 +19,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import MapView from 'react-native-maps';
 import { AppStackParamList } from '../../navigation/AppNavigator';
 import { supabase } from '../../lib/supabase';
-import { colors, spacing } from '../../styles/tokens';
+import { spacing } from '../../styles/tokens';
 import { Trip } from '../trip/StartTripModal';
 import SuccessToast from '../../components/SuccessToast';
 
@@ -314,91 +314,56 @@ const SOSRow = React.memo(({ sos, tripLabel, onPress }: SOSRowProps) => {
       : 'Active';
 
   return (
-    <Pressable style={ss.card} onPress={() => onPress(sos.id)}>
-      <View style={ss.cardInner}>
-        <View style={ss.icon}>
-          <Feather name="alert-triangle" size={16} color={H.red} />
-        </View>
-        <View style={ss.info}>
-          <Text style={ss.title}>{formatDateTimeShort(sos.triggered_at)}</Text>
-          <View style={ss.badgeRow}>
-            <View style={ss.triggerBadge}>
-              <Text style={ss.triggerBadgeText}>{TRIGGER_TYPE_LABEL[sos.trigger_type]}</Text>
-            </View>
-            <View style={[ss.badge, sos.alert_level === 1 ? ss.badgeLevel1 : ss.badgeLevel2]}>
-              <Text style={[ss.badgeText, sos.alert_level === 1 ? ss.badgeLevel1Text : ss.badgeLevel2Text]}>
-                {sos.alert_level === 1 ? '1st level' : '2nd level'}
-              </Text>
-            </View>
-            <View
-              style={[
-                ss.badge,
-                status === 'Resolved' ? ss.badgeResolved : status === 'Cancelled' ? ss.badgeCancelled : ss.badgeActive,
-              ]}
-            >
-              {status === 'Active' && <View style={ss.activeDot} />}
-              <Text
+    <View style={rs.rowOuter}>
+      <Pressable style={rs.card} onPress={() => onPress(sos.id)}>
+        <View style={rs.cardInner}>
+          <View style={[rs.tripIcon, rs.tripIconSOS]}>
+            <Feather name="alert-triangle" size={16} color={H.red} />
+          </View>
+          <View style={rs.info}>
+            <Text style={rs.tripTitle}>{formatDateTimeShort(sos.triggered_at)}</Text>
+            <View style={ss.badgeRow}>
+              <View style={ss.triggerBadge}>
+                <Text style={ss.triggerBadgeText}>{TRIGGER_TYPE_LABEL[sos.trigger_type]}</Text>
+              </View>
+              <View style={[ss.badge, sos.alert_level === 1 ? ss.badgeLevel1 : ss.badgeLevel2]}>
+                <Text style={[ss.badgeText, sos.alert_level === 1 ? ss.badgeLevel1Text : ss.badgeLevel2Text]}>
+                  {sos.alert_level === 1 ? '1st level' : '2nd level'}
+                </Text>
+              </View>
+              <View
                 style={[
-                  ss.badgeText,
-                  status === 'Resolved' ? ss.badgeResolvedText : status === 'Cancelled' ? ss.badgeCancelledText : ss.badgeActiveText,
+                  ss.badge,
+                  status === 'Resolved' ? ss.badgeResolved : status === 'Cancelled' ? ss.badgeCancelled : ss.badgeActive,
                 ]}
               >
-                {status}
-              </Text>
+                {status === 'Active' && <View style={ss.activeDot} />}
+                <Text
+                  style={[
+                    ss.badgeText,
+                    status === 'Resolved' ? ss.badgeResolvedText : status === 'Cancelled' ? ss.badgeCancelledText : ss.badgeActiveText,
+                  ]}
+                >
+                  {status}
+                </Text>
+              </View>
             </View>
+            {tripLabel && (
+              <View style={ss.locRow}>
+                <Feather name="map-pin" size={11} color={H.sub} />
+                <Text style={rs.meta} numberOfLines={1}>During trip: {tripLabel}</Text>
+              </View>
+            )}
           </View>
-          {tripLabel && (
-            <View style={ss.locRow}>
-              <Feather name="map-pin" size={11} color={H.sub} />
-              <Text style={ss.meta} numberOfLines={1}>During trip: {tripLabel}</Text>
-            </View>
-          )}
+          <Feather name="chevron-right" size={16} color={H.sub} />
         </View>
-        <Feather name="chevron-right" size={16} color={H.sub} />
-      </View>
-    </Pressable>
+      </Pressable>
+    </View>
   );
 });
 
 const ss = StyleSheet.create({
-  card: {
-    backgroundColor: colors.white,
-    borderRadius: 14,
-    borderLeftWidth: 3,
-    borderLeftColor: H.red,
-    borderWidth: 0.5,
-    borderColor: H.hairline,
-    marginBottom: 9,
-  },
-  cardInner: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    paddingVertical: 9,
-    paddingHorizontal: 13,
-    gap: 9,
-  },
-  icon: {
-    width: 31,
-    height: 31,
-    borderRadius: 9,
-    backgroundColor: H.redLight,
-    justifyContent: 'center',
-    alignItems: 'center',
-    flexShrink: 0,
-    marginTop: 1,
-  },
-  info: { flex: 1, gap: 4 },
-  title: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: H.ink,
-  },
   locRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  meta: {
-    fontSize: 11,
-    color: H.sub,
-    flexShrink: 1,
-  },
   badgeRow: { flexDirection: 'row', gap: 5, flexWrap: 'wrap' },
   triggerBadge: {
     backgroundColor: '#FEF3E2',
@@ -1093,6 +1058,7 @@ const rs = StyleSheet.create({
     fontSize: 25,
     fontWeight: '800',
     color: '#111827',
+    transform: [{ translateX: -10 }],
   },
   headerSub: {
     fontSize: 12,
@@ -1133,7 +1099,7 @@ const rs = StyleSheet.create({
     backgroundColor: '#F1EFF7',
     borderRadius: 12,
     padding: 3,
-    minHeight: 50,
+    minHeight: 55,
   },
   filterTab: {
     flex: 1,

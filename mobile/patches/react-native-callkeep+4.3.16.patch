@@ -1,0 +1,24 @@
+--- a/node_modules/react-native-callkeep/android/src/main/java/io/wazo/callkeep/RNCallKeepModule.java
++++ b/node_modules/react-native-callkeep/android/src/main/java/io/wazo/callkeep/RNCallKeepModule.java
+@@ -434,7 +434,10 @@
+         this.hasListeners = false;
+     }
+ 
+-    @ReactMethod
++    // Not annotated @ReactMethod — the JS wrapper's Android path always calls
++    // the 4-arg overload below, and TurboModule codegen (new architecture)
++    // rejects two @ReactMethod-annotated overloads sharing a JS method name
++    // ("Module exports two methods to JavaScript with the same name").
+     public void displayIncomingCall(String uuid, String number, String callerName) {
+         this.displayIncomingCall(uuid, number, callerName, false, null);
+     }
+@@ -483,7 +486,8 @@
+         conn.onAnswer();
+     }
+ 
+-    @ReactMethod
++    // Not annotated @ReactMethod — see the comment on the equivalent
++    // displayIncomingCall overload above; same duplicate-name conflict.
+     public void startCall(String uuid, String number, String callerName) {
+         this.startCall(uuid, number, callerName, false, null);
+     }

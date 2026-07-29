@@ -10,6 +10,10 @@ import CircleScreen from '../screens/circle/CircleScreen';
 import RoutesScreen from '../screens/routes/RoutesScreen';
 import TripDetailScreen from '../screens/routes/TripDetailScreen';
 import SOSDetailScreen from '../screens/sos/SOSDetailScreen';
+import IncomingCallScreen from '../screens/fakecall/IncomingCallScreen';
+import ActiveCallScreen from '../screens/fakecall/ActiveCallScreen';
+import { registerCallKeepListeners } from '../services/FakeCallKeepService';
+import { navigationRef } from './navigationRef';
 import SubscriptionScreen from '../screens/subscription/SubscriptionScreen';
 import DirectPaymentScreen from '../screens/subscription/DirectPaymentScreen';
 import TrialOfferScreen from '../screens/subscription/TrialOfferScreen';
@@ -29,6 +33,8 @@ export type AppStackParamList = {
   Routes: undefined;
   TripDetail: { tripId: string };
   SOSDetail: { sosId: string };
+  IncomingCall: { callerName: string; callUUID?: string };
+  ActiveCall: { callerName: string; callUUID?: string };
   Subscription: undefined;
   DirectPayment: { plan: 'basic' | 'elite' };
   TrialOffer: undefined;
@@ -49,7 +55,15 @@ const AuthStack = () => (
 
 type AppStackProps = { initialRoute: keyof AppStackParamList };
 
-const AppStack = ({ initialRoute }: AppStackProps) => (
+const AppStack = ({ initialRoute }: AppStackProps) => {
+  // Registered once for the app's lifetime — CallKeep's native answer/end
+  // events can fire outside any mounted screen, so navigation for them goes
+  // through `navigationRef` rather than a screen-bound useNavigation().
+  useEffect(() => {
+    registerCallKeepListeners();
+  }, []);
+
+  return (
   <AppStackNav.Navigator
     screenOptions={{ headerShown: false }}
     initialRouteName={initialRoute}
@@ -59,6 +73,16 @@ const AppStack = ({ initialRoute }: AppStackProps) => (
     <AppStackNav.Screen name="Routes" component={RoutesScreen} />
     <AppStackNav.Screen name="TripDetail" component={TripDetailScreen} />
     <AppStackNav.Screen name="SOSDetail" component={SOSDetailScreen} />
+    <AppStackNav.Screen
+      name="IncomingCall"
+      component={IncomingCallScreen}
+      options={{ headerShown: false, gestureEnabled: false }}
+    />
+    <AppStackNav.Screen
+      name="ActiveCall"
+      component={ActiveCallScreen}
+      options={{ headerShown: false, gestureEnabled: false }}
+    />
     <AppStackNav.Screen name="Subscription" component={SubscriptionScreen} />
     <AppStackNav.Screen name="DirectPayment" component={DirectPaymentScreen} />
     <AppStackNav.Screen name="TrialOffer" component={TrialOfferScreen} />
@@ -66,7 +90,8 @@ const AppStack = ({ initialRoute }: AppStackProps) => (
     <AppStackNav.Screen name="Settings" component={SettingsScreen} />
     <AppStackNav.Screen name="PhoneCapture" component={PhoneCaptureScreen} />
   </AppStackNav.Navigator>
-);
+  );
+};
 
 interface ProfileRow {
   subscription_status: string;
@@ -163,7 +188,7 @@ const AppNavigator = () => {
   }
 
   return (
-    <NavigationContainer>
+    <NavigationContainer ref={navigationRef}>
       {sessionExists ? <AppStack initialRoute={initialRoute} /> : <AuthStack />}
     </NavigationContainer>
   );

@@ -79,13 +79,21 @@ string }` in `AppStackParamList`.
   - Delivery: `delivery_method` → "Sent via SMS" / "Sent via internet" /
     "Sent via SMS + internet"
   - Trigger type: "Manual" / "Accident" / "Trip auto-SOS"
-- **Circle notified section**: contact **names only** (no phone numbers
-  rendered anywhere on this screen, per CLAUDE.md's data-minimization
-  posture already applied elsewhere in the app), resolved from
-  `sos_events.notified_contact_ids` → `trusted_contacts.name` for those
-  ids. Empty state: "No contacts were notified for this alert" (the
-  trip-less-SOS-with-zero-circle-members edge case, or a level-2 silent
-  event which never notifies anyone).
+- **Circle notified section** (superseded — see `flows/backend/sos-manual.md`
+  "Circle acknowledgement"): now reads live per-contact rows from
+  `sos_notifications` (name, relationship — joined back to
+  `trusted_contacts`, muted text — and a status badge: green "Acknowledged"
+  / grey "Notified" / red "Failed"), realtime-subscribed so a contact
+  tapping their SMS ack link updates the badge without a manual refresh.
+  Still **no phone numbers rendered anywhere on this screen**, per
+  CLAUDE.md's data-minimization posture. Events created before this pass
+  (no `sos_notifications` rows) fall back to the old names-only display
+  from `sos_events.notified_contact_ids` → `trusted_contacts.name`, with no
+  status badge. Empty state unchanged: "No contacts were notified for this
+  alert" (trip-less SOS with zero circle members, or a level-2 silent event
+  which never notifies anyone).
+- Pull-to-refresh added to this screen this pass (`RefreshControl` on the
+  `ScrollView`) — previously the screen had no way to manually re-fetch.
 - **Audio section** — shown only if at least one chunk exists in the
   `sos-audio` bucket under `{sosId}/`:
   - "Recording available" label.

@@ -45,6 +45,8 @@ import { colors, fontSizes, spacing } from '../../styles/tokens';
 import StartTripModal, { Trip } from './StartTripModal';
 import SuccessToast from '../../components/SuccessToast';
 import HadinLogo from '../../components/HadinLogo';
+import FakeCallSetupSheet from '../fakecall/FakeCallSetupSheet';
+import { displayIncomingFakeCall, ensureFakeCallPermissions } from '../../services/FakeCallKeepService';
 
 // ── AsyncStorage keys ─────────────────────────────────────────────────────────
 
@@ -1171,6 +1173,7 @@ const IdleView = ({
   onStartTrip, onSOSPress, onCancelSOS, onNavigateToCircle, onAddCircleMember, onNavigateToRoutes, onNavigateToSettings, onUpgrade,
 }: IdleViewProps) => {
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
   const visibleContacts = contacts.slice(0, 2);
   const historyItems = recentTrips.slice(0, 2);
 
@@ -1179,6 +1182,12 @@ const IdleView = ({
   const [modeToggleWidth, setModeToggleWidth] = useState(0);
   const [alwaysOnRunning, setAlwaysOnRunning] = useState(false);
   const [showUpgradeSheet, setShowUpgradeSheet] = useState(false);
+
+  // Fake call
+  const [showFakeCallSheet, setShowFakeCallSheet] = useState(false);
+  const [fakeCallCountdown, setFakeCallCountdown] = useState<number | null>(null);
+  const fakeCallNameRef = useRef('');
+  const fakeCallIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const modeSlide = useRef(new Animated.Value(userMode === 'trip' ? 1 : 0)).current;
   const modeDragStart = useRef(userMode === 'trip' ? 1 : 0);
   const addTripScale = useRef(new Animated.Value(1)).current;
@@ -1344,11 +1353,67 @@ const IdleView = ({
       .catch(() => setAwaitingPreciseFix(false));
   }, [locationGranted]);
 
+  // Fake call — countdown ticks down every second, then hands off to the
+  // incoming-call screen. Cleared on unmount so a dashboard leave/rerender
+  // can't leave a dangling interval.
+  useEffect(() => {
+    return () => {
+      if (fakeCallIntervalRef.current) clearInterval(fakeCallIntervalRef.current);
+    };
+  }, []);
+
+  const handleScheduleFakeCall = (callerName: string, seconds: number) => {
+    setShowFakeCallSheet(false);
+    fakeCallNameRef.current = callerName;
+    setFakeCallCountdown(seconds);
+    // Run permission checks/prompts now, as soon as the call is scheduled,
+    // so the user has the full countdown window to grant them rather than
+    // hitting a silent failure right as the call is meant to ring.
+    void ensureFakeCallPermissions();
+    if (fakeCallIntervalRef.current) clearInterval(fakeCallIntervalRef.current);
+    fakeCallIntervalRef.current = setInterval(() => {
+      setFakeCallCountdown((prev) => {
+        if (prev === null) return null;
+        if (prev <= 1) {
+          if (fakeCallIntervalRef.current) clearInterval(fakeCallIntervalRef.current);
+          fakeCallIntervalRef.current = null;
+          const callerName = fakeCallNameRef.current;
+          // Prefer the real native incoming-call screen (system ringtone,
+          // respects silent mode) — only fall back to the in-app screens if
+          // CallKeep setup/permission fails.
+          void displayIncomingFakeCall(callerName).then((uuid) => {
+            if (!uuid) navigation.replace('IncomingCall', { callerName });
+          });
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  const handleCancelFakeCall = () => {
+    if (fakeCallIntervalRef.current) clearInterval(fakeCallIntervalRef.current);
+    fakeCallIntervalRef.current = null;
+    setFakeCallCountdown(null);
+  };
+
   return (
     <View style={styles.idleRoot}>
       <View style={[styles.dashboardTop, { paddingTop: insets.top + 8 }]}>
         <HadinLogo size={27} />
       </View>
+
+      {fakeCallCountdown !== null && (
+        <Pressable
+          style={[styles.fakeCallBanner, { top: insets.top + 52 }]}
+          onPress={handleCancelFakeCall}
+        >
+          <Feather name="phone-incoming" size={14} color={colors.white} />
+          <Text style={styles.fakeCallBannerText}>
+            Incoming call in {fakeCallCountdown}s — Tap to cancel
+          </Text>
+        </Pressable>
+      )}
 
       <ScrollView
         style={styles.idleScroll}
@@ -1492,7 +1557,11 @@ const IdleView = ({
               >
                 <Feather name="crosshair" size={20} color="#4B0082" />
               </Pressable>
-              <Pressable style={[styles.mapControlBtn, sosActive && styles.lockedControl]} disabled={sosActive}>
+              <Pressable
+                style={[styles.mapControlBtn, sosActive && styles.lockedControl]}
+                disabled={sosActive}
+                onPress={() => setShowFakeCallSheet(true)}
+              >
                 <Feather name="phone" size={20} color="#4B0082" />
               </Pressable>
               <Pressable
@@ -1613,6 +1682,12 @@ const IdleView = ({
         visible={showUpgradeSheet}
         onClose={() => setShowUpgradeSheet(false)}
         onUpgrade={() => { setShowUpgradeSheet(false); onUpgrade(); }}
+      />
+
+      <FakeCallSetupSheet
+        visible={showFakeCallSheet}
+        onClose={() => setShowFakeCallSheet(false)}
+        onSchedule={handleScheduleFakeCall}
       />
     </View>
   );
@@ -2527,6 +2602,14 @@ const styles = StyleSheet.create({
   },
   sosStar: { color: colors.white, fontSize: 28, fontWeight: '900', lineHeight: 28 },
   sosText: { color: colors.white, fontSize: 8, fontWeight: '800', marginTop: -1 },
+  fakeCallBanner: {
+    position: 'absolute', left: 20, right: 20, zIndex: 20,
+    backgroundColor: '#4B0082', borderRadius: 24,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 10, paddingHorizontal: 16,
+    shadowColor: '#111827', shadowOpacity: 0.2, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 5,
+  },
+  fakeCallBannerText: { color: colors.white, fontSize: 12, fontWeight: '700' },
 
   // Dashboard sections
   safetyCircleSection: { marginTop: 8 },

@@ -14,6 +14,9 @@ Dashboard
 
 History : this page shows sos alerts and trips. it has a filter and search functionality and also a delete functionality
 
+History - SOS alerts 
+When a user clicks the sos alerts in the history page, a sos detail page should open. the should contain the details of the sos like location, audio recording, circle members alerted. user should be able to download or play the audio in app.
+
 
 User mode 
  the user modes has 2 options the always on and the trip mode. the always on means there is constant tracking of the user which allows the user to use features of the app such as sos, follow me, fake call anytime. it also allows auto sos when an accident occurs. trip mode requires the user to set a destination and eta for the tracking to happen. gps monitoring will only happen in trip mode when a trip is set not before. if a trip is not set no monitoring happens. user can set a trip when in always on mode but user cannot have constant monitoring when in trip mode. Always on mode is available to just the elite plan and trip mode is for the standard plan. the add a trip modal is triggered when the locations icon on the side of the map is clicked.
@@ -21,10 +24,12 @@ User mode
 SOS (manual trigger)
  Clicking the sos icon in the dashboard/active triggers the sos mode. on clicking the button a transparent red modal that covers the whole dashboard is displayed with a 20s timer that counts down and a confirm sos button, cancel sos button underneath. when the confirm button is clicked immediately the sos is sent, when the cancel sos button is clicked the sos is cancelled and the dashboard is displayed. when neither is clicked and the timer gets to 0 the sos is sent. when an sos alert is in progress the following happens. an sms alert is sent to the circle members. if its a trip mode, sos alerts is sent via sms to the circle members tied to that trip.the app 
 
+
+
 Follow me 
 Follow me feature is available for only the  elite plan users . the feature works by allowing a user to selects members of there circle or family group to follow them for a period of time to a destination. these users are alerted via sms and email immediately the follow me event is set. the user that are selected can view the real time map of the user that set the follow me and the other activities that happen during the lifecycle of the follow me event. the follow me activity is closed by the user that set it and notifications are sent to the selected inner circle or family group members. if during the follow me event an sos is placed, the users selected are alerted alongside the admin dashboard sees the alert.
 
-Fake call
+Fake call 
 This works by setting in how many minutes the user should receive a call. the user also sets a caller id that the user wants to display when the call comes in. after the set time has elapsed a call is placed to the users phone using the phones set ringtone and the set caller id is shown. The call appears as an actual call and when the user picks the UI for call in session for that phone is shown until the call is ended. every fake call placed and completed is logged in the history page as an activity with correct activity type which is fake call.
 
  User location when no gps 

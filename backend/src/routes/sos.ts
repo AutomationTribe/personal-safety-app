@@ -7,6 +7,10 @@ import { requireAuth, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
+// Public base URL for the acknowledgement link sent in SOS SMS/email — see
+// flows/backend/sos-manual.md "Blocked" for the DNS/deploy caveat.
+const ACK_BASE_URL = 'https://api.hadin.app';
+
 const SOSSchema = z.object({
   // Optional — SOS can be triggered from the idle dashboard with no active
   // trip (flows/mobile/sos-manual.md).
@@ -220,24 +224,75 @@ router.post(
       }, 60_000);
     }
 
+    // 4b. Create a sos_notifications row per contact — tracks individual
+    // acknowledgement status (Acknowledged / Notified / Failed in
+    // SOSDetailScreen), each with its own acknowledgement_token used to
+    // build a personalized ack link per recipient below.
+    const notificationTokenByContactId = new Map<string, string>();
+    if (eventId && total > 0) {
+      const { data: matchingProfiles } = await supabase
+        .from('profiles')
+        .select('phone')
+        .in('phone', contacts.map((c) => c.phone));
+      const platformPhones = new Set(
+        ((matchingProfiles ?? []) as Array<{ phone: string | null }>)
+          .map((p) => p.phone)
+          .filter((p): p is string => !!p),
+      );
+
+      const { data: notifRows, error: notifError } = await supabase
+        .from('sos_notifications')
+        .insert(
+          contacts.map((c) => ({
+            sos_event_id: eventId,
+            contact_id: c.id,
+            contact_name: c.name,
+            contact_phone: c.phone,
+            is_platform_user: platformPhones.has(c.phone),
+          })),
+        )
+        .select('contact_id, acknowledgement_token');
+
+      if (notifError) {
+        console.error('[SOS] sos_notifications insert failed:', notifError.message);
+      }
+      ((notifRows ?? []) as Array<{ contact_id: string; acknowledgement_token: string }>).forEach((n) => {
+        notificationTokenByContactId.set(n.contact_id, n.acknowledgement_token);
+      });
+    }
+
     // 5. Build SMS + email body
     const mapsUrl = `https://maps.google.com/?q=${lat},${lng}`;
-    const message = `SOS alert from ${userName}. His last know location is ${lat}, ${lng} (${mapsUrl}) - Hadin (https://hadin.app)`;
-    console.log(`[SOS] Message (${message.length} chars):`, message);
+    const baseMessage = `SOS alert from ${userName}. His last know location is ${lat}, ${lng} (${mapsUrl}) - Hadin (https://hadin.app)`;
 
     // 6. Send SMS + email to all contacts — Promise.allSettled so one
     // failure (or one channel) never blocks the others. `notified` tracks
     // SMS delivery specifically, matching the mobile UI's existing
     // "Contacts reached: X of Y" contract; email is best-effort on top.
+    // Every contact's message includes their own acknowledgement link —
+    // FCM push infra isn't wired up yet (see flows/backend/sos-manual.md),
+    // so this SMS link is the only acknowledgement path for platform and
+    // non-platform contacts alike for now.
     let notified = 0;
     if (total > 0) {
       const results = await Promise.allSettled(
-        contacts.map(async ({ phone, email }) => {
+        contacts.map(async ({ id, phone, email }) => {
+          const token = notificationTokenByContactId.get(id);
+          const message = token
+            ? `${baseMessage}. Tap to acknowledge: ${ACK_BASE_URL}/api/v1/sos/ack/${token}`
+            : baseMessage;
+
           const smsResult = await sendSMS(phone, message);
           if (smsResult.success) {
             console.log(`[SOS] SMS sent → ${phone} | id: ${smsResult.messageId}`);
           } else {
             console.warn(`[SOS] SMS failed → ${phone}: ${smsResult.error ?? 'unknown'}`);
+            if (token) {
+              await supabase
+                .from('sos_notifications')
+                .update({ delivery_status: 'failed' })
+                .eq('acknowledgement_token', token);
+            }
           }
 
           if (email) {
@@ -304,6 +359,135 @@ router.patch(
     }
 
     console.log(`[SOS] Cancelled event=${id} user=${userId}`);
+    res.json({ success: true });
+  },
+);
+
+// ── GET /api/v1/sos/ack/:token ───────────────────────────────────────────────
+// Public — no auth. Reached by tapping the acknowledgement link in the SOS
+// SMS/email. The circle member is never logged in, so this must work
+// without a Bearer token; it's the only ack path today (see the "FCM not
+// wired up" note in flows/backend/sos-manual.md).
+
+function ackHtml(title: string, body: string): string {
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hadin Safety</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#F4F3EF;color:#1A1A1A;
+       display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center}
+  .card{background:#fff;border-radius:16px;padding:32px 24px;max-width:360px;box-shadow:0 2px 12px rgba(0,0,0,0.08)}
+  h1{font-size:20px;margin:0 0 12px}
+  p{font-size:14px;line-height:1.5;color:#6B6A73;margin:0}
+</style></head>
+<body><div class="card"><h1>${title}</h1><p>${body}</p></div></body></html>`;
+}
+
+router.get(
+  '/ack/:token',
+  async (req: Request, res: Response): Promise<void> => {
+    const { token } = req.params;
+
+    const { data: notif } = await supabase
+      .from('sos_notifications')
+      .select('id, sos_event_id, acknowledged_at')
+      .eq('acknowledgement_token', token)
+      .single();
+
+    if (!notif) {
+      res.status(404).type('html').send(
+        ackHtml('Link not found', 'This acknowledgement link is invalid or has expired.'),
+      );
+      return;
+    }
+
+    const row = notif as { id: string; sos_event_id: string; acknowledged_at: string | null };
+
+    const { data: sosEvent } = await supabase
+      .from('sos_events')
+      .select('user_id')
+      .eq('id', row.sos_event_id)
+      .single();
+
+    let firstName = 'them';
+    if (sosEvent) {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('full_name')
+        .eq('id', (sosEvent as { user_id: string }).user_id)
+        .single();
+      const fullName = (profile as { full_name: string | null } | null)?.full_name;
+      if (fullName) firstName = fullName.split(' ')[0];
+    }
+
+    // Idempotent — tapping the link again just re-shows the confirmation,
+    // acknowledged_at is only ever set once.
+    if (!row.acknowledged_at) {
+      await supabase
+        .from('sos_notifications')
+        .update({ acknowledged_at: new Date().toISOString(), delivery_status: 'acknowledged' })
+        .eq('id', row.id);
+      console.log(`[SOS] Notification acknowledged id=${row.id} event=${row.sos_event_id}`);
+    }
+
+    res.status(200).type('html').send(
+      ackHtml('✓ Acknowledged', `You have confirmed you received this SOS alert from Hadin Safety. Please check on ${firstName} immediately.`),
+    );
+  },
+);
+
+// ── POST /api/v1/sos/ack/platform ────────────────────────────────────────────
+// Authenticated — for a circle member who also has a Hadin account (their
+// contact phone matches their own profile.phone) to acknowledge from inside
+// the app. Built per spec; not currently reachable from any mobile screen —
+// there's no push notification (FCM isn't wired up, see flows doc) or
+// "alerts sent to me" inbox to tap into it from yet. The universal SMS ack
+// link above works for platform and non-platform contacts alike today.
+
+const AckPlatformSchema = z.object({
+  sos_event_id: z.string().uuid(),
+});
+
+router.post(
+  '/ack/platform',
+  requireAuth,
+  async (req: Request, res: Response): Promise<void> => {
+    const parsed = AckPlatformSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: parsed.error.issues[0]?.message ?? 'Invalid request',
+        code: 'VALIDATION_ERROR',
+      });
+      return;
+    }
+
+    const userId = (req as AuthRequest).user.id;
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('phone')
+      .eq('id', userId)
+      .single();
+    const myPhone = (profile as { phone: string | null } | null)?.phone;
+
+    if (!myPhone) {
+      res.status(404).json({ error: 'No phone on file for this account', code: 'NOT_FOUND' });
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('sos_notifications')
+      .update({ acknowledged_at: new Date().toISOString(), delivery_status: 'acknowledged' })
+      .eq('sos_event_id', parsed.data.sos_event_id)
+      .eq('contact_phone', myPhone)
+      .select('id')
+      .single();
+
+    if (error || !data) {
+      res.status(404).json({ error: 'Notification not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    console.log(`[SOS] Platform ack event=${parsed.data.sos_event_id} user=${userId}`);
     res.json({ success: true });
   },
 );
