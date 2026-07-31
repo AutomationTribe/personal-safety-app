@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { ActivityIndicator, View } from 'react-native';
 import { supabase } from '../lib/supabase';
+import AppSplashScreen from '../components/AppSplashScreen';
 import LoginScreen from '../screens/auth/LoginScreen';
 import SignupScreen from '../screens/auth/SignupScreen';
 import HomeScreen from '../screens/trip/HomeScreen';
@@ -20,7 +20,6 @@ import TrialOfferScreen from '../screens/subscription/TrialOfferScreen';
 import SuccessScreen from '../screens/subscription/SuccessScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
 import PhoneCaptureScreen from '../screens/auth/PhoneCaptureScreen';
-import { colors } from '../styles/tokens';
 
 export type AuthStackParamList = {
   Login: undefined;
@@ -175,16 +174,7 @@ const AppNavigator = () => {
   }, []);
 
   if (initializing) {
-    return (
-      <View style={{
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-        backgroundColor: colors.background,
-      }}>
-        <ActivityIndicator size="large" color={colors.primary} />
-      </View>
-    );
+    return <AppSplashScreen />;
   }
 
   return (

@@ -7,6 +7,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Audio } from 'expo-av';
 import { AppStackParamList } from '../../navigation/AppNavigator';
 import { answerFakeCall, rejectFakeCall } from '../../services/FakeCallKeepService';
+import SystemRingtone from '../../../modules/system-ringtone/src/SystemRingtoneModule';
 import { colors } from '../../styles/tokens';
 
 function initials(name: string): string {
@@ -20,29 +21,28 @@ const IncomingCallScreen = () => {
   const { callerName, callUUID } = route.params;
 
   const soundRef = useRef<Audio.Sound | null>(null);
+  const usingSystemRingtoneRef = useRef(false);
   const pulse = useRef(new Animated.Value(0.4)).current;
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Self-managed telecom connections (which is what real CallKeep calls
-      // are here) don't get an automatic system ringtone — Android's docs
-      // are explicit that self-managed apps are responsible for playing
-      // their own. Prefer the device's actual default ringtone (so it
-      // sounds like a real call) and only fall back to the bundled tone if
-      // that content URI can't be resolved.
+      // Play the device's actual default ringtone through the native
+      // Ringtone API (android.media.Ringtone), not expo-av — Ringtone.play()
+      // routes through the RINGTONE audio stream, so it automatically
+      // follows the phone's ringer volume and is silent when the phone is
+      // on silent/vibrate, exactly like a real incoming call. expo-av always
+      // plays on the media stream regardless of ringer mode, which is why
+      // this needs its own native module rather than just loading the
+      // ringtone's content URI as a sound file.
       if (Platform.OS === 'android') {
         try {
-          const { sound } = await Audio.Sound.createAsync(
-            { uri: 'content://settings/system/ringtone' },
-            { isLooping: true, volume: 1 },
-          );
+          await SystemRingtone.play();
           if (cancelled) {
-            await sound.unloadAsync();
+            await SystemRingtone.stop();
             return;
           }
-          soundRef.current = sound;
-          await sound.playAsync();
+          usingSystemRingtoneRef.current = true;
           return;
         } catch {
           // Fall through to the bundled tone below.
@@ -67,6 +67,10 @@ const IncomingCallScreen = () => {
 
     return () => {
       cancelled = true;
+      if (usingSystemRingtoneRef.current) {
+        SystemRingtone.stop().catch(() => {});
+        usingSystemRingtoneRef.current = false;
+      }
       soundRef.current?.stopAsync().catch(() => {});
       soundRef.current?.unloadAsync().catch(() => {});
       soundRef.current = null;
@@ -83,6 +87,10 @@ const IncomingCallScreen = () => {
   }, [pulse]);
 
   const stopRingtone = async () => {
+    if (usingSystemRingtoneRef.current) {
+      await SystemRingtone.stop().catch(() => {});
+      usingSystemRingtoneRef.current = false;
+    }
     try {
       await soundRef.current?.stopAsync();
       await soundRef.current?.unloadAsync();
