@@ -24,6 +24,7 @@ function planFromAmount(amount: number): string {
   for (const [plan, planAmount] of Object.entries(PLAN_AMOUNTS)) {
     if (planAmount === amount) return plan;
   }
+  console.warn(`[payments] planFromAmount: unknown amount ${amount} — defaulting to elite`);
   return 'elite'; // unknown amount → default to highest tier (safe fallback)
 }
 

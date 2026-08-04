@@ -25,7 +25,11 @@ app.use(
   cors({
     origin: (origin, callback) => {
       // Allow server-to-server (no Origin header) and known origins
-      if (!origin || ALLOWED_ORIGINS.includes(origin) || defaultOrigins.includes(origin)) {
+      if (
+        !origin ||
+        ALLOWED_ORIGINS.includes(origin) ||
+        (process.env.NODE_ENV !== 'production' && defaultOrigins.includes(origin))
+      ) {
         callback(null, true);
       } else {
         callback(new Error(`CORS: origin ${origin} not allowed`));

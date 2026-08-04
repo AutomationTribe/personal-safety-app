@@ -123,7 +123,7 @@ router.post(
 
     // Rate limit check
     const { count: recentCount } = rateResult;
-    if ((recentCount ?? 0) >= 5) {
+    if ((recentCount ?? 0) >= 3) {
       console.log(`[SOS] Rate limit hit — user=${userId}`);
       res.json({ success: true, rateLimited: true, notified: 0, total: 0 });
       return;
