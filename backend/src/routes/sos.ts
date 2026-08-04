@@ -4,6 +4,8 @@ import { supabase } from '../lib/supabase';
 import { sendSMS } from '../services/africastalking';
 import { sendEmail } from '../services/email';
 import { requireAuth, AuthRequest } from '../middleware/auth';
+import { sosRateLimit } from '../middleware/rateLimit';
+import rateLimit from 'express-rate-limit';
 
 const router = Router();
 
@@ -15,8 +17,8 @@ const SOSSchema = z.object({
   // Optional — SOS can be triggered from the idle dashboard with no active
   // trip (flows/mobile/sos-manual.md).
   tripId: z.string().uuid().nullable().optional(),
-  lat: z.number(),
-  lng: z.number(),
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
   timestamp: z.string(),
   // 1 = circle + monitoring center (default, unchanged behaviour).
   // 2 = monitoring center only — fired automatically by the mobile
@@ -75,6 +77,7 @@ function formatTime(iso: string): string {
 router.post(
   '/',
   requireAuth,
+  sosRateLimit,
   async (req: Request, res: Response): Promise<void> => {
     const parsed = SOSSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -89,36 +92,52 @@ router.post(
     const userId = (req as AuthRequest).user.id;
     const coords = `POINT(${lng} ${lat})`;
 
-    // Rate limit: max 5 per user per 10 min — always return 200, just log
+    // ── Phase 1: parallel independent reads ──────────────────────────────────
     const windowStart = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-    const { count: recentCount } = await supabase
-      .from('sos_events')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .gte('triggered_at', windowStart);
 
-    if ((recentCount ?? 0) >= 5) {
+    const [rateResult, tripResult, profileResult] = await Promise.all([
+      // 1a. Rate check
+      supabase
+        .from('sos_events')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .gte('triggered_at', windowStart),
+
+      // 1b. Trip lookup (only if tripId was supplied)
+      tripId
+        ? supabase
+            .from('trips')
+            .select('id, contact_ids')
+            .eq('id', tripId)
+            .eq('user_id', userId)
+            .single()
+        : Promise.resolve({ data: null, error: null, count: null }),
+
+      // 1c. User profile (for display name in SMS)
+      supabase
+        .from('profiles')
+        .select('full_name')
+        .eq('id', userId)
+        .single(),
+    ]);
+
+    // Rate limit check
+    const { count: recentCount } = rateResult;
+    if ((recentCount ?? 0) >= 3) {
       console.log(`[SOS] Rate limit hit — user=${userId}`);
       res.json({ success: true, rateLimited: true, notified: 0, total: 0 });
       return;
     }
 
-    // 1. If a trip was given, verify it belongs to this user. No trip is
-    // valid too — a manual SOS from the idle dashboard has none.
+    // Trip existence check
     let trip: { id: string; contact_ids: string[] | null } | null = null;
     if (tripId) {
-      const { data, error: tripError } = await supabase
-        .from('trips')
-        .select('id, contact_ids')
-        .eq('id', tripId)
-        .eq('user_id', userId)
-        .single();
-
-      if (tripError || !data) {
+      const { data: tripData, error: tripError } = tripResult;
+      if (tripError || !tripData) {
         res.status(404).json({ error: 'Trip not found', code: 'NOT_FOUND' });
         return;
       }
-      trip = data as { id: string; contact_ids: string[] | null };
+      trip = tripData as { id: string; contact_ids: string[] | null };
     }
 
     // 2nd-level alert: monitoring-center-only, silent. Skip the contacts
@@ -177,15 +196,9 @@ router.post(
     const contacts = (contactRows ?? []) as Array<{ id: string; name: string; phone: string; email: string | null }>;
     const total = contacts.length;
 
-    // 3. Get user display name from profiles; fall back to auth email
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('full_name')
-      .eq('id', userId)
-      .single();
-
+    // 3. Get user display name from Phase 1 profile result; fall back to auth email
     const rawName: string =
-      ((profile as { full_name: string | null } | null)?.full_name) ??
+      ((profileResult.data as { full_name: string | null } | null)?.full_name) ??
       (req as AuthRequest).user.email ??
       'A Hadin user';
     const userName = rawName.slice(0, 20);
@@ -263,7 +276,7 @@ router.post(
 
     // 5. Build SMS + email body
     const mapsUrl = `https://maps.google.com/?q=${lat},${lng}`;
-    const baseMessage = `SOS alert from ${userName}. His last know location is ${lat}, ${lng} (${mapsUrl}) - Hadin (https://hadin.app)`;
+    const baseMessage = `SOS alert from ${userName}. Their last known location is ${lat}, ${lng} (${mapsUrl}) - Hadin (https://hadin.app)`;
 
     // 6. Send SMS + email to all contacts — Promise.allSettled so one
     // failure (or one channel) never blocks the others. `notified` tracks
@@ -383,8 +396,22 @@ function ackHtml(title: string, body: string): string {
 <body><div class="card"><h1>${title}</h1><p>${body}</p></div></body></html>`;
 }
 
+// SEC-07: IP-based rate limit for the public ack endpoint — 20 taps per minute per IP
+const ackRateLimit = rateLimit({
+  windowMs: 60 * 1000,       // 1 minute
+  max: 20,                   // 20 ack taps per IP per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).type('html').send(
+      ackHtml('Too many requests', 'Please wait a moment before trying again.'),
+    );
+  },
+});
+
 router.get(
   '/ack/:token',
+  ackRateLimit,
   async (req: Request, res: Response): Promise<void> => {
     const { token } = req.params;
 

@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { createClient } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+import { supabaseAdmin } from '../lib/supabase';
+import { requireAuth, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -19,34 +19,13 @@ const SUBSCRIPTION_CURRENCY = 'NGN';
 // Does not need to be a real page — the mobile app catches it before the browser loads it.
 const CALLBACK_URL = 'https://hadin.app/payment/callback';
 
-// Service-role client for writing to profiles without RLS restrictions
-const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL ?? '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY ?? '',
-);
-
-// ── Auth middleware ────────────────────────────────────────────────────────────
-
-type AuthedRequest = Request & { user: { id: string; email?: string } };
-
-async function requireAuth(req: Request, res: Response, next: () => void): Promise<void> {
-  const header = req.headers.authorization ?? '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-
-  if (!token) {
-    res.status(401).json({ error: 'Unauthorized', code: 'AUTH_REQUIRED' });
-    return;
+// Derive subscription plan from verified payment amount — never trust client metadata
+function planFromAmount(amount: number): string {
+  for (const [plan, planAmount] of Object.entries(PLAN_AMOUNTS)) {
+    if (planAmount === amount) return plan;
   }
-
-  const { data: { user }, error } = await supabase.auth.getUser(token);
-
-  if (error || !user) {
-    res.status(401).json({ error: 'Unauthorized', code: 'AUTH_REQUIRED' });
-    return;
-  }
-
-  (req as AuthedRequest).user = { id: user.id, email: user.email };
-  next();
+  console.warn(`[payments] planFromAmount: unknown amount ${amount} — defaulting to elite`);
+  return 'elite'; // unknown amount → default to highest tier (safe fallback)
 }
 
 // ── POST /api/v1/payments/init ────────────────────────────────────────────────
@@ -57,9 +36,9 @@ const InitSchema = z.object({
   plan: z.enum(['basic', 'elite']).default('elite'),
 });
 
-router.post('/init', requireAuth as unknown as Parameters<typeof router.post>[1], async (req: Request, res: Response) => {
+router.post('/init', requireAuth, async (req: Request, res: Response) => {
   try {
-    const user = (req as AuthedRequest).user;
+    const user = (req as AuthRequest).user;
     const parsed = InitSchema.safeParse(req.body);
     const plan = parsed.success ? parsed.data.plan : 'elite';
     const amount = PLAN_AMOUNTS[plan] ?? PLAN_AMOUNTS.elite;
@@ -119,9 +98,9 @@ router.post('/init', requireAuth as unknown as Parameters<typeof router.post>[1]
 
 const VerifySchema = z.object({ reference: z.string().min(1) });
 
-router.post('/verify', requireAuth as unknown as Parameters<typeof router.post>[1], async (req: Request, res: Response) => {
+router.post('/verify', requireAuth, async (req: Request, res: Response) => {
   try {
-    const user = (req as AuthedRequest).user;
+    const user = (req as AuthRequest).user;
     const parsed = VerifySchema.safeParse(req.body);
 
     if (!parsed.success) {
@@ -148,7 +127,7 @@ router.post('/verify', requireAuth as unknown as Parameters<typeof router.post>[
       return;
     }
 
-    const plan = data.data.metadata?.plan ?? 'elite';
+    const plan = planFromAmount(data.data.amount);
     const nextBillingDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
 
     // Activate subscription in Supabase
@@ -176,9 +155,28 @@ router.post('/verify', requireAuth as unknown as Parameters<typeof router.post>[
 // ── POST /api/v1/payments/trial/start ────────────────────────────────────────
 // Activates an 8-day free trial. No card required.
 
-router.post('/trial/start', requireAuth as unknown as Parameters<typeof router.post>[1], async (req: Request, res: Response) => {
+router.post('/trial/start', requireAuth, async (req: Request, res: Response) => {
   try {
-    const user = (req as AuthedRequest).user;
+    const user = (req as AuthRequest).user;
+
+    // Guard: reject if user already had a trial or has an active subscription
+    const { data: existing } = await supabaseAdmin
+      .from('profiles')
+      .select('trial_start, subscription_status')
+      .eq('id', user.id)
+      .single();
+
+    if (existing) {
+      const row = existing as { trial_start: string | null; subscription_status: string | null };
+      if (row.trial_start) {
+        res.status(409).json({ error: 'Trial already used', code: 'TRIAL_EXHAUSTED' });
+        return;
+      }
+      if (row.subscription_status === 'active') {
+        res.status(409).json({ error: 'Account already has an active subscription', code: 'TRIAL_EXHAUSTED' });
+        return;
+      }
+    }
 
     const now = new Date();
     const trialEnd = new Date(now.getTime() + 8 * 24 * 60 * 60 * 1000);
@@ -221,16 +219,21 @@ router.post('/webhook', async (req: Request, res: Response) => {
     const signature = req.headers['x-paystack-signature'] as string;
     const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
 
-    if (rawBody && PAYSTACK_SECRET) {
-      const hash = crypto
-        .createHmac('sha512', PAYSTACK_SECRET)
-        .update(rawBody)
-        .digest('hex');
+    // SEC-02: Signature verification is unconditional — reject if either is missing
+    if (!rawBody || !PAYSTACK_SECRET) {
+      console.error('[webhook] Missing rawBody or PAYSTACK_SECRET — rejecting');
+      res.status(500).json({ error: 'Webhook misconfigured' });
+      return;
+    }
 
-      if (hash !== signature) {
-        res.status(401).json({ error: 'Invalid signature' });
-        return;
-      }
+    const hash = crypto
+      .createHmac('sha512', PAYSTACK_SECRET)
+      .update(rawBody)
+      .digest('hex');
+
+    if (hash !== signature) {
+      res.status(401).json({ error: 'Invalid signature' });
+      return;
     }
 
     const event = req.body as {
@@ -238,14 +241,25 @@ router.post('/webhook', async (req: Request, res: Response) => {
       data: {
         reference: string;
         status: string;
+        amount: number;
         metadata?: { user_id?: string };
       };
     };
 
     if (event.event === 'charge.success') {
       const userId = event.data.metadata?.user_id;
-      const plan = (event.data.metadata as Record<string, string> | undefined)?.plan ?? 'elite';
+      // SEC-03: Derive plan from verified amount — never trust client metadata
+      const plan = planFromAmount(event.data.amount);
       if (userId) {
+        // SEC-14: Verify the user exists in auth.users before writing to profiles
+        const { data: authUser, error: userLookupErr } = await supabaseAdmin.auth.admin.getUserById(userId);
+        if (userLookupErr || !authUser.user) {
+          console.warn(`[webhook] user_id ${userId} not found in auth.users — skipping upsert`);
+          // Return 200 so Paystack doesn't retry — the event is invalid, not a server error
+          res.json({ received: true });
+          return;
+        }
+
         const nextBillingDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
         const { error: whErr } = await supabaseAdmin
           .from('profiles')
