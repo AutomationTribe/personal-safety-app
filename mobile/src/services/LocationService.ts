@@ -1,7 +1,20 @@
 import * as Location from 'expo-location';
 import * as SQLite from 'expo-sqlite';
+import * as Battery from 'expo-battery';
 import { supabase } from '../lib/supabase';
 import { checkIsOnline } from '../hooks/useNetworkStatus';
+
+export type TrackingMode = 'continuous' | 'interval';
+
+// Trip Mode battery gate: above RESUME it tracks continuously (live map);
+// at/below THRESHOLD it drops to the same interval cadence as Always
+// Online to save battery. The gap between the two is deliberate hysteresis
+// (matches the pattern already used for Always Online's pause/resume in
+// BatteryMonitor.ts) so it doesn't flap continuous/interval every time the
+// level ticks across a single cutoff.
+const TRIP_LOW_BATTERY_THRESHOLD = 0.20;
+const TRIP_LOW_BATTERY_RESUME_THRESHOLD = 0.25;
+export const TRIP_LOW_BATTERY_INTERVAL_MINUTES = 15;
 
 export interface LocationPing {
   // null = Always Online ping, not tied to any trip.
@@ -20,6 +33,10 @@ export interface LocationPing {
 
 let _db: SQLite.SQLiteDatabase | null = null;
 let _trackingSubscription: Location.LocationSubscription | null = null;
+let _intervalTimerId: ReturnType<typeof setInterval> | null = null;
+let _mode: TrackingMode | null = null;
+let _tripBatteryListener: Battery.Subscription | null = null;
+let _tripBatteryDegraded = false;
 let _activeTripId: string | null = null;
 // Distinct from _activeTripId — Always Online tracking has no trip, but is
 // still "tracking" (captureAndQueue must not bail out).
@@ -157,17 +174,19 @@ export function isAccurateEnough(accuracy: number | null): boolean {
 
 // ── Core logic ───────────────────────────────────────────────────────────────
 
-async function captureAndQueue(): Promise<void> {
-  if (!_isTracking) return;
+async function captureAndQueue(
+  accuracy: Location.Accuracy = Location.Accuracy.BestForNavigation,
+): Promise<LocationPing | null> {
+  if (!_isTracking) return null;
 
   // When stationary, skip alternate pings to double effective interval
   if (_isStationary) {
     _skipNextPing = !_skipNextPing;
-    if (_skipNextPing) return;
+    if (_skipNextPing) return null;
   }
 
   const position = await Location.getCurrentPositionAsync({
-    accuracy: Location.Accuracy.BestForNavigation,
+    accuracy,
     // NOTE: `maximumAge` (reject cached readings older than 5s) was
     // requested but is not a valid expo-location `LocationOptions` field —
     // it's a browser Geolocation API concept this SDK doesn't expose. The
@@ -184,13 +203,14 @@ async function captureAndQueue(): Promise<void> {
         `[LocationService] Discarded low-accuracy fix: ${position.coords.accuracy?.toFixed(0) ?? '?'}m (threshold ${ACCURACY_THRESHOLD_METRES}m)`,
       );
     }
-    return;
+    return null;
   }
 
   _pingCount++;
 
   const { latitude: lat, longitude: lng } = position.coords;
   updateStationaryState(lat, lng);
+  _positionListener?.(lat, lng);
 
   const queued = await (await getDb()).getAllAsync<{ id: number }>(
     `SELECT id FROM location_pings_queue WHERE synced = 0`,
@@ -198,7 +218,7 @@ async function captureAndQueue(): Promise<void> {
 
   if (__DEV__) {
     console.log(
-      `[LocationService] Ping #${_pingCount} | accuracy: ${position.coords.accuracy?.toFixed(0)}m | stationary: ${_isStationary} | queued: ${queued.length} | mode: high-accuracy-gps`,
+      `[LocationService] Ping #${_pingCount} | accuracy: ${position.coords.accuracy?.toFixed(0)}m | stationary: ${_isStationary} | queued: ${queued.length} | mode: ${_mode ?? 'unknown'}`,
     );
   }
 
@@ -231,44 +251,16 @@ async function captureAndQueue(): Promise<void> {
       if (row) await markSynced(db, [row.id]);
     }
   }
+
+  return ping;
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// ── Continuous vs interval mechanics ─────────────────────────────────────────
 
-/**
- * Start writing pings on a battery-optimized cadence.
- * Pass a tripId for Trip Mode, or null for Always Online (pings are still
- * written — with trip_id = null — so Always Online works with no active trip).
- */
-export async function startTracking(tripId: string | null, intervalMinutes: number): Promise<void> {
-  // NOTE: True background location requires a dev build (not Expo Go)
-  // expo-task-manager + expo-background-fetch handles the 30-min
-  // heartbeat. Foreground tracking works in Expo Go.
-  // Switch to dev build (eas build --profile development) for
-  // full background support in Phase 6.
-  if (_trackingSubscription) {
-    console.warn('[LocationService] Already tracking. Call stopTracking() first.');
-    return;
-  }
-
-  await ensurePermission();
-  _activeTripId = tripId;
-  _isTracking = true;
-  _pingCount = 0;
-  _lastPingLat = null;
-  _lastPingLng = null;
-  _consecutiveStationaryCount = 0;
-  _isStationary = false;
-  _skipNextPing = false;
-
-  // Capture immediately on start
-  await captureAndQueue();
-
-  // High-accuracy GPS mode — street-level fixes only. `intervalMinutes` is
-  // still accepted for API compatibility with existing callers, but the
-  // watcher itself now runs on a fixed 5s/10m trigger rather than the
-  // caller-supplied cadence (see flows/mobile/fixes/gps-accuracy.md).
-  void intervalMinutes;
+async function startContinuousWatch(): Promise<void> {
+  // High-accuracy GPS mode — street-level fixes only, fixed 5s/10m trigger
+  // (live map cadence, not the caller-supplied interval — this path is only
+  // used for Trip Mode, which wants a live map, not periodic checks).
   _trackingSubscription = await Location.watchPositionAsync(
     {
       accuracy: Location.Accuracy.BestForNavigation,
@@ -279,9 +271,132 @@ export async function startTracking(tripId: string | null, intervalMinutes: numb
       if (isAccurateEnough(pos.coords.accuracy)) {
         _positionListener?.(pos.coords.latitude, pos.coords.longitude);
       }
-      await captureAndQueue();
+      await captureAndQueue(Location.Accuracy.BestForNavigation);
     },
   );
+}
+
+function stopContinuousWatch(): void {
+  _trackingSubscription?.remove();
+  _trackingSubscription = null;
+}
+
+function startIntervalPolling(minutes: number): void {
+  stopIntervalPolling();
+  // Battery-first rule: Balanced accuracy (not BestForNavigation) for
+  // interval pings, and getCurrentPositionAsync (not a continuous watch)
+  // so the GPS lock is acquired and released each time rather than held.
+  _intervalTimerId = setInterval(() => {
+    void captureAndQueue(Location.Accuracy.Balanced);
+  }, minutes * 60_000);
+}
+
+function stopIntervalPolling(): void {
+  if (_intervalTimerId) clearInterval(_intervalTimerId);
+  _intervalTimerId = null;
+}
+
+async function switchTrackingMode(mode: TrackingMode): Promise<void> {
+  if (_mode === mode) return;
+  _mode = mode;
+  if (mode === 'continuous') {
+    stopIntervalPolling();
+    await startContinuousWatch();
+  } else {
+    stopContinuousWatch();
+    startIntervalPolling(TRIP_LOW_BATTERY_INTERVAL_MINUTES);
+  }
+}
+
+/**
+ * Trip Mode only — degrades a continuous session to the same interval
+ * cadence as Always Online once battery is low, and restores continuous
+ * tracking once it recovers. Best-effort: any expo-battery failure just
+ * leaves tracking in whatever mode it already started in.
+ */
+async function startTripBatteryGate(): Promise<void> {
+  stopTripBatteryGate();
+  _tripBatteryDegraded = false;
+
+  try {
+    const level = await Battery.getBatteryLevelAsync();
+    if (level >= 0 && level <= TRIP_LOW_BATTERY_THRESHOLD) {
+      _tripBatteryDegraded = true;
+      await switchTrackingMode('interval');
+    }
+
+    _tripBatteryListener = Battery.addBatteryLevelListener(({ batteryLevel }) => {
+      if (!_tripBatteryDegraded && batteryLevel <= TRIP_LOW_BATTERY_THRESHOLD) {
+        _tripBatteryDegraded = true;
+        void switchTrackingMode('interval');
+      } else if (_tripBatteryDegraded && batteryLevel > TRIP_LOW_BATTERY_RESUME_THRESHOLD) {
+        _tripBatteryDegraded = false;
+        void switchTrackingMode('continuous');
+      }
+    });
+  } catch {
+    // Non-fatal — tracking continues in its current mode without the gate.
+  }
+}
+
+function stopTripBatteryGate(): void {
+  _tripBatteryListener?.remove();
+  _tripBatteryListener = null;
+  _tripBatteryDegraded = false;
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────
+
+/**
+ * Start writing pings on a battery-optimized cadence.
+ * Pass a tripId for Trip Mode, or null for Always Online (pings are still
+ * written — with trip_id = null — so Always Online works with no active trip).
+ *
+ * `mode` picks the tracking mechanism:
+ * - 'continuous' (default, Trip Mode): live 5s/10m GPS watch for the active
+ *   map, automatically degraded to 'interval' if the battery gets low (see
+ *   `startTripBatteryGate`).
+ * - 'interval': periodic `intervalMinutes`-spaced checks (GPS lock acquired
+ *   and released each time, not held) — used for Always Online, and for
+ *   Trip Mode once battery is low.
+ */
+export async function startTracking(
+  tripId: string | null,
+  intervalMinutes: number,
+  mode: TrackingMode = 'continuous',
+): Promise<void> {
+  // NOTE: True background location requires a dev build (not Expo Go)
+  // expo-task-manager + expo-background-fetch handles the 30-min
+  // heartbeat. Foreground tracking works in Expo Go.
+  // Switch to dev build (eas build --profile development) for
+  // full background support in Phase 6.
+  if (_isTracking) {
+    console.warn('[LocationService] Already tracking. Call stopTracking() first.');
+    return;
+  }
+
+  await ensurePermission();
+  _activeTripId = tripId;
+  _isTracking = true;
+  _mode = mode;
+  _pingCount = 0;
+  _lastPingLat = null;
+  _lastPingLng = null;
+  _consecutiveStationaryCount = 0;
+  _isStationary = false;
+  _skipNextPing = false;
+
+  // Capture immediately on start
+  await captureAndQueue(mode === 'continuous' ? Location.Accuracy.BestForNavigation : Location.Accuracy.Balanced);
+
+  if (mode === 'continuous') {
+    await startContinuousWatch();
+    // Only Trip Mode starts continuous — Always Online always starts in
+    // 'interval' mode, so this gate only ever applies to trips.
+    await startTripBatteryGate();
+  } else {
+    startIntervalPolling(intervalMinutes);
+  }
 }
 
 /**
@@ -294,10 +409,10 @@ export function setPositionListener(listener: ((lat: number, lng: number) => voi
 }
 
 export async function stopTracking(): Promise<void> {
-  if (_trackingSubscription) {
-    _trackingSubscription.remove();
-    _trackingSubscription = null;
-  }
+  stopContinuousWatch();
+  stopIntervalPolling();
+  stopTripBatteryGate();
+  _mode = null;
   _activeTripId = null;
   _isTracking = false;
   _positionListener = null;

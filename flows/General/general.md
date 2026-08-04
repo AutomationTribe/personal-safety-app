@@ -33,3 +33,5 @@ Fake call
 This works by setting in how many minutes the user should receive a call. the user also sets a caller id that the user wants to display when the call comes in. after the set time has elapsed a call is placed to the users phone using the phones set ringtone and the set caller id is shown. The call appears as an actual call and when the user picks the UI for call in session for that phone is shown until the call is ended. every fake call placed and completed is logged in the history page as an activity with correct activity type which is fake call.
 
  User location when no gps 
+
+Always on ping frequency option

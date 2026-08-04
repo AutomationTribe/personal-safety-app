@@ -223,12 +223,12 @@ describe('flushQueue', () => {
 // ── Battery-mode logging ──────────────────────────────────────────────────────
 
 describe('Accuracy-mode logging', () => {
-  it('logs mode: high-accuracy-gps when __DEV__ is true', async () => {
+  it('logs the active tracking mode when __DEV__ is true', async () => {
     const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     await startTracking('trip-1', 30);
 
     const calls = consoleSpy.mock.calls.map((args) => String(args[0]));
-    expect(calls.some((c) => c.includes('mode: high-accuracy-gps'))).toBe(true);
+    expect(calls.some((c) => c.includes('mode: continuous'))).toBe(true);
 
     consoleSpy.mockRestore();
     await stopTracking();

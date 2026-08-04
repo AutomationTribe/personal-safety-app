@@ -203,135 +203,141 @@ const SignupScreen = ({ navigation }: Props) => {
         </View>
 
         <View style={styles.card}>
-          <Pressable
-            style={({ pressed }) => [
-              styles.googleBtn,
-              (googleLoading || loading) && styles.googleBtnDisabled,
-              pressed && !googleLoading && !loading && styles.pressed,
-            ]}
-            onPress={handleGoogleSignIn}
-            disabled={googleLoading || loading}
-          >
-            {googleLoading ? (
-              <ActivityIndicator color={colors.brand.primary} size="small" />
-            ) : (
-              <View style={styles.googleIcon}>
-                <Image
-                  source={require('../../../assets/google-g-logo.png')}
-                  style={styles.googleLogo}
-                  resizeMode="contain"
+          <View style={styles.cardBody}>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.googleBtn,
+                (googleLoading || loading) && styles.googleBtnDisabled,
+                pressed && !googleLoading && !loading && styles.pressed,
+              ]}
+              onPress={handleGoogleSignIn}
+              disabled={googleLoading || loading}
+            >
+              {googleLoading ? (
+                <ActivityIndicator color={colors.brand.primary} size="small" />
+              ) : (
+                <>
+                  <View style={styles.googleIcon}>
+                    <Image
+                      source={require('../../../assets/google-g-logo.png')}
+                      style={styles.googleLogo}
+                      resizeMode="contain"
+                    />
+                  </View>
+                  <Text style={styles.googleBtnText}>Sign up with Google</Text>
+                </>
+              )}
+            </Pressable>
+
+            <View style={styles.dividerRow}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.dividerText}>OR</Text>
+              <View style={styles.dividerLine} />
+            </View>
+
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Phone Number</Text>
+              <View style={[styles.inputWrapper, touched.phone && errors.phone ? styles.inputError : null]}>
+                <Feather name="phone" size={15} color="#9CA3AF" style={styles.leftIcon} />
+                <TextInput
+                  style={styles.input}
+                  value={phone}
+                  onChangeText={setPhone}
+                  onBlur={() => blur('phone')}
+                  editable={!loading}
+                  placeholder="+1 (555) 000-0000"
+                  placeholderTextColor="#A7ADB7"
+                  keyboardType="phone-pad"
+                  returnKeyType="next"
+                  autoCorrect={false}
                 />
               </View>
-            )}
-            <Text style={styles.googleBtnText}>Sign up with Google</Text>
-          </Pressable>
-
-          <View style={styles.dividerRow}>
-            <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>OR</Text>
-            <View style={styles.dividerLine} />
-          </View>
-
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Phone Number</Text>
-            <View style={[styles.inputWrapper, touched.phone && errors.phone ? styles.inputError : null]}>
-              <Feather name="phone" size={15} color="#9CA3AF" style={styles.leftIcon} />
-              <TextInput
-                style={styles.input}
-                value={phone}
-                onChangeText={setPhone}
-                onBlur={() => blur('phone')}
-                editable={!loading}
-                placeholder="+1 (555) 000-0000"
-                placeholderTextColor="#A7ADB7"
-                keyboardType="phone-pad"
-                returnKeyType="next"
-                autoCorrect={false}
-              />
+              {touched.phone && errors.phone ? <Text style={styles.errorText}>{errors.phone}</Text> : null}
             </View>
-            {touched.phone && errors.phone ? <Text style={styles.errorText}>{errors.phone}</Text> : null}
-          </View>
 
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Email Address</Text>
-            <View style={[styles.inputWrapper, touched.email && errors.email ? styles.inputError : null]}>
-              <Feather name="mail" size={15} color="#9CA3AF" style={styles.leftIcon} />
-              <TextInput
-                style={styles.input}
-                value={email}
-                onChangeText={setEmail}
-                onBlur={() => blur('email')}
-                editable={!loading}
-                placeholder="name@company.com"
-                placeholderTextColor="#A7ADB7"
-                keyboardType="email-address"
-                autoCapitalize="none"
-                autoCorrect={false}
-                returnKeyType="next"
-              />
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Email Address</Text>
+              <View style={[styles.inputWrapper, touched.email && errors.email ? styles.inputError : null]}>
+                <Feather name="mail" size={15} color="#9CA3AF" style={styles.leftIcon} />
+                <TextInput
+                  style={styles.input}
+                  value={email}
+                  onChangeText={setEmail}
+                  onBlur={() => blur('email')}
+                  editable={!loading}
+                  placeholder="name@company.com"
+                  placeholderTextColor="#A7ADB7"
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="next"
+                />
+              </View>
+              {touched.email && errors.email ? <Text style={styles.errorText}>{errors.email}</Text> : null}
             </View>
-            {touched.email && errors.email ? <Text style={styles.errorText}>{errors.email}</Text> : null}
-          </View>
 
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Password</Text>
-            <View style={[styles.inputWrapper, touched.password && errors.password ? styles.inputError : null]}>
-              <Feather name="lock" size={15} color="#9CA3AF" style={styles.leftIcon} />
-              <TextInput
-                style={styles.input}
-                value={password}
-                onChangeText={setPassword}
-                onBlur={() => blur('password')}
-                editable={!loading}
-                placeholder="********"
-                placeholderTextColor="#A7ADB7"
-                secureTextEntry={!showPassword}
-                returnKeyType="done"
-                onSubmitEditing={handleSubmit}
-              />
-              <Pressable onPress={() => setShowPassword((v) => !v)} hitSlop={8} style={styles.eyeBtn}>
-                <Feather name={showPassword ? 'eye-off' : 'eye'} size={16} color="#9C9A92" />
-              </Pressable>
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Password</Text>
+              <View style={[styles.inputWrapper, touched.password && errors.password ? styles.inputError : null]}>
+                <Feather name="lock" size={15} color="#9CA3AF" style={styles.leftIcon} />
+                <TextInput
+                  style={styles.input}
+                  value={password}
+                  onChangeText={setPassword}
+                  onBlur={() => blur('password')}
+                  editable={!loading}
+                  placeholder="********"
+                  placeholderTextColor="#A7ADB7"
+                  secureTextEntry={!showPassword}
+                  returnKeyType="done"
+                  onSubmitEditing={handleSubmit}
+                />
+                <Pressable onPress={() => setShowPassword((v) => !v)} hitSlop={8} style={styles.eyeBtn}>
+                  <Feather name={showPassword ? 'eye-off' : 'eye'} size={16} color="#9C9A92" />
+                </Pressable>
+              </View>
+              {touched.password && errors.password ? <Text style={styles.errorText}>{errors.password}</Text> : null}
+              <Text style={styles.passwordHint}>Must be at least 8 characters with a symbol.</Text>
             </View>
-            {touched.password && errors.password ? <Text style={styles.errorText}>{errors.password}</Text> : null}
-            <Text style={styles.passwordHint}>Must be at least 8 characters with a symbol.</Text>
-          </View>
 
-          <Pressable
-            style={({ pressed }) => [styles.button, pressed && !loading && styles.buttonPressed]}
-            onPress={handleSubmit}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <>
-                <Text style={styles.buttonText}>Sign Up</Text>
-                <Feather name="arrow-right" size={17} color="#fff" />
-              </>
-            )}
-          </Pressable>
-
-          {isDuplicate ? (
-            <View style={styles.serverErrorBox}>
-              <Feather name="alert-circle" size={14} color={colors.danger} />
-              <Text style={styles.serverErrorText}>
-                An account with this phone number or email already exists.
-              </Text>
-            </View>
-          ) : serverError ? (
-            <View style={styles.serverErrorBox}>
-              <Feather name="alert-circle" size={14} color={colors.danger} />
-              <Text style={styles.serverErrorText}>{serverError}</Text>
-            </View>
-          ) : null}
-
-          <View style={styles.switchRow}>
-            <Text style={styles.switchText}>Already have an account? </Text>
-            <Pressable onPress={() => navigation.navigate('Login')} disabled={loading}>
-              <Text style={styles.switchLink}>Log In</Text>
+            <Pressable
+              style={({ pressed }) => [styles.button, pressed && !loading && styles.buttonPressed]}
+              onPress={handleSubmit}
+              disabled={loading}
+            >
+              {loading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <Text style={styles.buttonText}>Sign Up</Text>
+                  <Feather name="arrow-right" size={16} color="#fff" />
+                </>
+              )}
             </Pressable>
+
+            {isDuplicate ? (
+              <View style={styles.serverErrorBox}>
+                <Feather name="alert-circle" size={14} color={colors.danger} />
+                <Text style={styles.serverErrorText}>
+                  An account with this phone number or email already exists.
+                </Text>
+              </View>
+            ) : serverError ? (
+              <View style={styles.serverErrorBox}>
+                <Feather name="alert-circle" size={14} color={colors.danger} />
+                <Text style={styles.serverErrorText}>{serverError}</Text>
+              </View>
+            ) : null}
           </View>
+        </View>
+
+        {/* Footer */}
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>Already have an account?</Text>
+          <Pressable onPress={() => navigation.navigate('Login')} disabled={loading}>
+            <Text style={styles.footerLink}> Log In</Text>
+          </Pressable>
         </View>
 
         <Text style={styles.termsText}>
@@ -357,54 +363,60 @@ const styles = StyleSheet.create({
   },
   container: {
     flexGrow: 1,
-    justifyContent: 'flex-start',
-    paddingHorizontal: 4,
+    paddingHorizontal: 18,
+    justifyContent: 'center',
   },
   hero: {
     alignItems: 'center',
-    marginBottom: 22,
+    marginBottom: 24,
   },
   logoMark: {
-    width: 42,
-    height: 42,
-    marginBottom: 14,
+    width: 52,
+    height: 52,
+    marginBottom: 12,
   },
   heroTitle: {
     color: '#060B16',
-    fontSize: 21,
+    fontSize: 27,
     fontWeight: '800',
-    marginBottom: 5,
+    marginBottom: 8,
   },
   heroSubtitle: {
     color: '#374151',
-    fontSize: 12,
+    fontSize: 14,
     textAlign: 'center',
   },
+
+  // Card
   card: {
-    backgroundColor: '#fff',
     borderRadius: 8,
+    overflow: 'hidden',
+    shadowColor: '#111827',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    elevation: 4,
     borderWidth: 1,
     borderColor: '#DEE3EA',
-    paddingHorizontal: 16,
-    paddingTop: 15,
-    paddingBottom: 18,
-    shadowColor: '#111827',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.03,
-    shadowRadius: 10,
-    elevation: 1,
   },
+  cardBody: {
+    backgroundColor: '#fff',
+    paddingHorizontal: 23,
+    paddingTop: 23,
+    paddingBottom: 25,
+  },
+
   googleBtn: {
-    height: 31,
-    borderRadius: 5,
+    height: 42,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: '#D7DCE3',
     backgroundColor: '#fff',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    marginBottom: 17,
+    gap: 9,
+    marginBottom: 22,
   },
   googleIcon: {
     width: 20,
@@ -413,12 +425,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   googleLogo: {
-    width: 14,
-    height: 14,
+    width: 18,
+    height: 18,
   },
   googleBtnText: {
     color: '#111827',
-    fontSize: 9,
+    fontSize: 13,
     fontWeight: '700',
   },
   googleBtnDisabled: { opacity: 0.6 },
@@ -426,7 +438,7 @@ const styles = StyleSheet.create({
   dividerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 15,
+    marginBottom: 20,
   },
   dividerLine: {
     flex: 1,
@@ -434,25 +446,25 @@ const styles = StyleSheet.create({
     backgroundColor: '#D6DAE1',
   },
   dividerText: {
-    marginHorizontal: 12,
+    marginHorizontal: 10,
     color: '#6B7280',
-    fontSize: 8,
+    fontSize: 10,
     fontWeight: '600',
   },
   inputGroup: {
-    marginBottom: 11,
+    marginBottom: 16,
   },
   inputLabel: {
     fontSize: 10,
     fontWeight: '800',
     color: '#5B21B6',
-    marginBottom: 5,
+    marginBottom: 4,
   },
   inputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: 31,
-    borderRadius: 5,
+    height: 44,
+    borderRadius: 8,
     paddingHorizontal: 12,
     backgroundColor: '#ECEEF1',
   },
@@ -472,8 +484,8 @@ const styles = StyleSheet.create({
     padding: 0,
   },
   eyeBtn: {
-    width: 28,
-    height: 28,
+    width: 40,
+    height: 40,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -484,19 +496,20 @@ const styles = StyleSheet.create({
   },
   passwordHint: {
     color: '#4B5563',
-    fontSize: 8,
+    fontSize: 10,
     marginTop: 4,
   },
+
+  // CTA button
   button: {
-    height: 34,
-    borderRadius: 5,
+    height: 45,
+    borderRadius: 8,
     backgroundColor: '#4B00B5',
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
     gap: 8,
-    marginTop: 15,
-    marginBottom: 20,
+    marginTop: 16,
     shadowColor: '#4B00B5',
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.2,
@@ -506,7 +519,7 @@ const styles = StyleSheet.create({
   buttonPressed: { opacity: 0.85 },
   buttonText: {
     color: '#fff',
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '800',
   },
   serverErrorBox: {
@@ -518,7 +531,7 @@ const styles = StyleSheet.create({
     borderColor: '#FECACA',
     borderRadius: 8,
     padding: 10,
-    marginBottom: 16,
+    marginTop: 16,
   },
   serverErrorText: {
     flex: 1,
@@ -526,31 +539,31 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
   },
-  signInLink: {
-    fontWeight: '700',
-    textDecorationLine: 'underline',
-  },
-  switchRow: {
+
+  // Footer
+  footer: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 31,
   },
-  switchText: {
+  footerText: {
+    fontSize: 11,
     color: '#4B5563',
-    fontSize: 12,
   },
-  switchLink: {
+  footerLink: {
+    fontSize: 11,
+    fontWeight: '800',
     color: '#5B21B6',
-    fontSize: 12,
-    fontWeight: '700',
   },
+
   termsText: {
     textAlign: 'center',
-    fontSize: 8,
+    fontSize: 9,
     color: '#B5BBC5',
-    lineHeight: 12,
+    lineHeight: 13,
     marginHorizontal: 22,
-    marginTop: 25,
+    marginTop: 20,
   },
   termsLink: {
     color: '#8E96A3',

@@ -190,13 +190,13 @@ const CircleScreen = () => {
     <View style={[styles.root, isEmpty && styles.emptyRoot]}>
       {isEmpty ? (
         <View style={[styles.emptyTopBar, { paddingTop: insets.top + 18 }]}>
-          <HadinLogo size={24} />
+          <HadinLogo size={28} />
           <Text style={styles.emptyBrandTitle}>Hadin</Text>
           <Feather name="bell" size={21} color="#050505" />
         </View>
       ) : (
         <View style={[styles.topBar, { paddingTop: insets.top + 13 }]}>
-          <HadinLogo size={24} />
+          <HadinLogo size={28} />
           <Feather name="bell" size={18} color="#111827" />
         </View>
       )}

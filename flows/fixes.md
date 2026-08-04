@@ -16,3 +16,5 @@ Clicking trip mode user mode in the dashboard should not trigger the add a trip 
 New Active Trip page
 a map has been added to the new active trip screen already in the app. this map should show the current location of the user during the duration of the trip. the current location should show the current location of the user from the lasted ping. Time elapsed is showed -1 when a trip started that should not be possible it should always show 0m. user location on map, current location and time elapsed should continue to update in real time. every other functionality remains as is.
 
+user registration
+

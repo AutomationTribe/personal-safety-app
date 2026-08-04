@@ -132,10 +132,18 @@ async function resolveInitialRoute(userId: string): Promise<keyof AppStackParamL
   }
 }
 
+const MIN_SPLASH_MS = 7000;
+
 const AppNavigator = () => {
-  const [initializing, setInitializing] = useState(true);
+  const [authReady, setAuthReady] = useState(false);
+  const [minSplashElapsed, setMinSplashElapsed] = useState(false);
   const [sessionExists, setSessionExists] = useState(false);
   const [initialRoute, setInitialRoute] = useState<keyof AppStackParamList>('Home');
+
+  useEffect(() => {
+    const timer = setTimeout(() => setMinSplashElapsed(true), MIN_SPLASH_MS);
+    return () => clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     supabase.auth.getSession()
@@ -152,7 +160,7 @@ const AppNavigator = () => {
         setSessionExists(false);
       })
       .finally(() => {
-        setInitializing(false);
+        setAuthReady(true);
       });
 
     let subscription: { unsubscribe: () => void } | null = null;
@@ -173,7 +181,7 @@ const AppNavigator = () => {
     return () => subscription?.unsubscribe();
   }, []);
 
-  if (initializing) {
+  if (!authReady || !minSplashElapsed) {
     return <AppSplashScreen />;
   }
 

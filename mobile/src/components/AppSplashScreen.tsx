@@ -1,8 +1,56 @@
-import React from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useRef } from 'react';
+import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Feather } from '@expo/vector-icons';
 import HadinLogo from './HadinLogo';
+
+const DOT_COUNT = 3;
+const PULSE_DURATION_MS = 500;
+const DOT_STAGGER_MS = 160;
+
+const LoadingDots = () => {
+  const pulses = useRef(
+    Array.from({ length: DOT_COUNT }, () => new Animated.Value(0.3))
+  ).current;
+
+  useEffect(() => {
+    const animations = pulses.map((pulse, index) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(index * DOT_STAGGER_MS),
+          Animated.timing(pulse, {
+            toValue: 1,
+            duration: PULSE_DURATION_MS,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulse, {
+            toValue: 0.3,
+            duration: PULSE_DURATION_MS,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.delay((DOT_COUNT - 1 - index) * DOT_STAGGER_MS),
+        ])
+      )
+    );
+    Animated.parallel(animations).start();
+    return () => animations.forEach((anim) => anim.stop());
+  }, [pulses]);
+
+  return (
+    <View style={styles.dotsRow}>
+      {pulses.map((pulse, index) => (
+        <Animated.View
+          key={index}
+          style={[
+            styles.dot,
+            { opacity: pulse, transform: [{ scale: pulse }] },
+          ]}
+        />
+      ))}
+    </View>
+  );
+};
 
 const AppSplashScreen = () => (
   <LinearGradient
@@ -13,19 +61,12 @@ const AppSplashScreen = () => (
   >
     <View style={styles.center}>
       <View style={styles.logoCard}>
-        <HadinLogo size={64} />
+        <HadinLogo size={76} />
       </View>
       <Text style={styles.title}>HADIN</Text>
       <Text style={styles.tagline}>Safe together.</Text>
       <View style={styles.divider} />
-    </View>
-
-    <View style={styles.footer}>
-      <View style={styles.footerRow}>
-        <Feather name="shield" size={14} color="rgba(255,255,255,0.65)" />
-        <Text style={styles.footerLabel}>SECURED INFRASTRUCTURE</Text>
-      </View>
-      <Text style={styles.footerCopyright}>Hadin Security Systems © 2024</Text>
+      <LoadingDots />
     </View>
   </LinearGradient>
 );
@@ -39,8 +80,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 32,
   },
   logoCard: {
-    width: 100,
-    height: 100,
+    width: 112,
+    height: 112,
     borderRadius: 26,
     backgroundColor: '#FFFFFF',
     alignItems: 'center',
@@ -69,25 +110,16 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.25)',
     marginTop: 36,
   },
-  footer: {
-    alignItems: 'center',
-    paddingBottom: 48,
-  },
-  footerRow: {
+  dotsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+    gap: 10,
+    marginTop: 28,
   },
-  footerLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 1,
-    color: 'rgba(255,255,255,0.65)',
-  },
-  footerCopyright: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.45)',
-    marginTop: 6,
+  dot: {
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
+    backgroundColor: '#FFFFFF',
   },
 });
 

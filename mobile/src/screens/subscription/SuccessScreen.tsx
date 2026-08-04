@@ -27,7 +27,7 @@ const SuccessScreen = ({ navigation, route }: Props) => {
     <View style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       <View style={styles.content}>
         <View style={styles.iconCircle}>
-          <HadinLogo size={54} />
+          <HadinLogo size={64} />
         </View>
 
         <Text style={styles.title}>You're protected.</Text>

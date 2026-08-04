@@ -61,3 +61,6 @@ pids/
 .cache/
 .parcel-cache/
 dist/
+
+# Screens (design/bug reference assets)
+screens/

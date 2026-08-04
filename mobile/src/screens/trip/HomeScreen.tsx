@@ -61,7 +61,9 @@ const ARRIVAL_RADIUS_METRES = 50;
 const ARRIVAL_DEBOUNCE_MS = 30_000;
 const AREYOUOKAY_TIMEOUT_MS = 60_000;
 const ARRIVAL_AUTO_END_MS = 5 * 60_000;
-const ALWAYS_ONLINE_INTERVAL_MINUTES = 1;
+// Configurable per-user in Settings in a future pass (flows/fixes.md) — 15
+// minutes for now.
+const ALWAYS_ONLINE_INTERVAL_MINUTES = 15;
 const TRIP_INTERVAL_MINUTES = 30;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -357,6 +359,10 @@ const HomeScreen = () => {
   const handleAudioSkip = async () => {
     await AsyncStorage.setItem(SETUP_AUDIO_KEY, 'skipped').catch(() => null);
     await checkSetupSteps();
+  };
+
+  const handleSetupCancel = () => {
+    setSetupStep(null);
   };
 
   const handlePinDigit = async (digit: string) => {
@@ -847,6 +853,7 @@ const HomeScreen = () => {
         onGpsEnable={handleGpsEnable}
         onAudioEnable={handleAudioEnable}
         onAudioSkip={handleAudioSkip}
+        onCancel={handleSetupCancel}
         onPinDigit={handlePinDigit}
         onPinBackspace={handlePinBackspace}
       />
@@ -864,6 +871,7 @@ interface SetupModalProps {
   onGpsEnable: () => void;
   onAudioEnable: () => void;
   onAudioSkip: () => void;
+  onCancel: () => void;
   onPinDigit: (d: string) => void;
   onPinBackspace: () => void;
 }
@@ -872,7 +880,7 @@ const PIN_PAD = [['1','2','3'],['4','5','6'],['7','8','9'],['','0','⌫']] as co
 
 const SetupModal = ({
   step, pinInput, pinStage, pinError,
-  onGpsEnable, onAudioEnable, onAudioSkip, onPinDigit, onPinBackspace,
+  onGpsEnable, onAudioEnable, onAudioSkip, onCancel, onPinDigit, onPinBackspace,
 }: SetupModalProps) => {
   const insets = useSafeAreaInsets();
   if (!step) return null;
@@ -914,10 +922,16 @@ const SetupModal = ({
                 You can skip this for now.
               </Text>
               <Pressable
-                style={({ pressed }) => [smStyles.primaryBtn, pressed && smStyles.pressed]}
+                style={({ pressed }) => [smStyles.primaryBtn, smStyles.audioPrimaryBtn, pressed && smStyles.pressed]}
                 onPress={onAudioEnable}
               >
                 <Text style={smStyles.primaryBtnText}>Enable Microphone</Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [smStyles.cancelBtn, pressed && smStyles.pressed]}
+                onPress={onCancel}
+              >
+                <Text style={smStyles.cancelBtnText}>Cancel</Text>
               </Pressable>
               <Pressable
                 style={({ pressed }) => [smStyles.skipBtn, pressed && smStyles.pressed]}
@@ -986,6 +1000,13 @@ const SetupModal = ({
                   </View>
                 ))}
               </View>
+
+              <Pressable
+                style={({ pressed }) => [smStyles.cancelBtn, smStyles.pinCancelBtn, pressed && smStyles.pressed]}
+                onPress={onCancel}
+              >
+                <Text style={smStyles.cancelBtnText}>Cancel</Text>
+              </Pressable>
             </>
           )}
 
@@ -1223,7 +1244,7 @@ const IdleView = ({
       setPositionListener((lat, lng) => {
         setMapRegion({ latitude: lat, longitude: lng, latitudeDelta: 0.01, longitudeDelta: 0.01 });
       });
-      await startTracking(null, ALWAYS_ONLINE_INTERVAL_MINUTES);
+      await startTracking(null, ALWAYS_ONLINE_INTERVAL_MINUTES, 'interval');
       setAlwaysOnRunning(true);
 
       // Battery gate: pause tracking at <=15%, notify, resume automatically
@@ -1400,7 +1421,7 @@ const IdleView = ({
   return (
     <View style={styles.idleRoot}>
       <View style={[styles.dashboardTop, { paddingTop: insets.top + 8 }]}>
-        <HadinLogo size={27} />
+        <HadinLogo size={32} />
       </View>
 
       {fakeCallCountdown !== null && (
@@ -2896,6 +2917,13 @@ const smStyles = StyleSheet.create({
     borderRadius: 12, paddingVertical: 15, alignItems: 'center', marginBottom: 10,
   },
   primaryBtnText: { fontSize: fontSizes.body, fontWeight: '700', color: colors.white },
+  audioPrimaryBtn: { backgroundColor: '#4B0082' },
+  cancelBtn: {
+    width: '100%', borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  cancelBtnText: { fontSize: fontSizes.body, fontWeight: '700', color: colors.brand.textPrimary },
+  pinCancelBtn: { marginTop: 20, marginBottom: 0 },
   skipBtn: { width: '100%', paddingVertical: 12, alignItems: 'center', marginBottom: 4 },
   skipBtnText: { fontSize: fontSizes.caption, color: colors.brand.textSecondary, fontWeight: '600' },
   pressed: { opacity: 0.8 },

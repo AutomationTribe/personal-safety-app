@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Image,
   ImageBackground,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -48,6 +49,22 @@ const LoginScreen = ({ navigation }: Props) => {
   const [resetLoading, setResetLoading] = useState(false);
   const [resetSent, setResetSent] = useState(false);
   const [resetCooldown, setResetCooldown] = useState(0);
+  const [resetKeyboardHeight, setResetKeyboardHeight] = useState(0);
+
+  // Modal's statusBarTranslucent breaks Android's adjustResize, so the reset
+  // sheet has to shift itself up manually instead of relying on
+  // KeyboardAvoidingView/adjustResize inside the Modal.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const showSub = Keyboard.addListener('keyboardDidShow', (e) =>
+      setResetKeyboardHeight(e.endCoordinates.height)
+    );
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => setResetKeyboardHeight(0));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   useEffect(() => {
     identifierRef.current?.focus();
@@ -250,7 +267,7 @@ const LoginScreen = ({ navigation }: Props) => {
             {/* Error banner */}
             {authError ? (
               <View style={styles.errorBanner}>
-                <Feather name="alert-circle" size={14} color="#DC2626" />
+                <Feather name="alert-circle" size={14} color={colors.danger} />
                 <Text style={styles.errorBannerText}>{authError}</Text>
               </View>
             ) : null}
@@ -343,17 +360,20 @@ const LoginScreen = ({ navigation }: Props) => {
           <Pressable style={StyleSheet.absoluteFillObject} onPress={handleCloseResetSheet} />
 
           <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={rs.kav}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={[rs.kav, Platform.OS === 'android' && { marginBottom: resetKeyboardHeight }]}
           >
             <View style={rs.sheet}>
               <View style={rs.handle} />
 
-              <View style={[rs.iconWrap, resetSent || !resetHasError ? rs.iconWrapGreen : rs.iconWrapRed]}>
+              <View style={[
+                rs.iconWrap,
+                resetHasError ? rs.iconWrapRed : resetSent ? rs.iconWrapGreen : rs.iconWrapBrand,
+              ]}>
                 <Feather
                   name={resetSent ? 'check-circle' : 'lock'}
                   size={24}
-                  color={resetSent || !resetHasError ? '#1A6B4A' : '#C0392B'}
+                  color={resetHasError ? '#C0392B' : resetSent ? '#1A6B4A' : '#4B0082'}
                 />
               </View>
 
@@ -484,7 +504,7 @@ const LoginScreen = ({ navigation }: Props) => {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F7F8FC',
   },
   keyboardRoot: {
     flex: 1,
@@ -499,18 +519,18 @@ const styles = StyleSheet.create({
     marginBottom: 24,
   },
   logoMark: {
-    width: 43,
-    height: 43,
+    width: 52,
+    height: 52,
     marginBottom: 12,
   },
   heroTitle: {
-    color: '#0F172A',
+    color: '#060B16',
     fontSize: 27,
     fontWeight: '800',
     marginBottom: 8,
   },
   heroSubtitle: {
-    color: '#64748B',
+    color: '#374151',
     fontSize: 14,
     textAlign: 'center',
   },
@@ -519,13 +539,13 @@ const styles = StyleSheet.create({
   card: {
     borderRadius: 8,
     overflow: 'hidden',
-    shadowColor: '#000',
+    shadowColor: '#111827',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.08,
     shadowRadius: 16,
     elevation: 4,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderColor: '#DEE3EA',
   },
 
   // Body
@@ -541,7 +561,7 @@ const styles = StyleSheet.create({
     height: 42,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#CBD5E1',
+    borderColor: '#D7DCE3',
     backgroundColor: '#fff',
     flexDirection: 'row',
     alignItems: 'center',
@@ -562,7 +582,7 @@ const styles = StyleSheet.create({
     height: 18,
   },
   googleBtnText: {
-    color: '#0F172A',
+    color: '#111827',
     fontSize: 13,
     fontWeight: '700',
   },
@@ -576,13 +596,13 @@ const styles = StyleSheet.create({
   dividerLine: {
     flex: 1,
     height: StyleSheet.hairlineWidth,
-    backgroundColor: '#E2E0DA',
+    backgroundColor: '#D6DAE1',
   },
   dividerText: {
     marginHorizontal: 10,
     fontSize: 10,
     fontWeight: '600',
-    color: '#94A3B8',
+    color: '#6B7280',
     letterSpacing: 0,
   },
 
@@ -592,6 +612,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -600,22 +622,22 @@ const styles = StyleSheet.create({
   errorBannerText: {
     flex: 1,
     fontSize: 13,
-    color: '#DC2626',
+    color: colors.danger,
   },
 
   // Fields
   fieldGroup: { marginBottom: 16 },
   fieldLabel: {
     fontSize: 10,
-    fontWeight: '700',
-    color: '#374151',
+    fontWeight: '800',
+    color: '#5B21B6',
     letterSpacing: 0,
     marginBottom: 4,
   },
   fieldLabelInline: {
     fontSize: 10,
-    fontWeight: '700',
-    color: '#374151',
+    fontWeight: '800',
+    color: '#5B21B6',
     letterSpacing: 0,
   },
   securityKeyRow: {
@@ -627,17 +649,15 @@ const styles = StyleSheet.create({
   recoveryLink: {
     fontSize: 10,
     fontWeight: '700',
-    color: '#155EEA',
+    color: '#5B21B6',
   },
   inputWrapper: {
     height: 44,
     borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#9CA3AF',
-    backgroundColor: '#fff',
+    paddingHorizontal: 12,
+    backgroundColor: '#ECEEF1',
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
   },
   input: {
     flex: 1,
@@ -656,18 +676,23 @@ const styles = StyleSheet.create({
   ctaBtn: {
     height: 45,
     borderRadius: 8,
-    backgroundColor: '#155EEA',
+    backgroundColor: '#4B00B5',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
     marginTop: 16,
+    shadowColor: '#4B00B5',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 5,
+    elevation: 3,
   },
   ctaBtnPressed: { opacity: 0.85 },
   ctaBtnText: {
     color: '#fff',
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '800',
   },
 
   // Footer
@@ -679,12 +704,12 @@ const styles = StyleSheet.create({
   },
   footerText: {
     fontSize: 11,
-    color: '#64748B',
+    color: '#4B5563',
   },
   footerLink: {
     fontSize: 11,
-    fontWeight: '700',
-    color: '#0F172A',
+    fontWeight: '800',
+    color: '#5B21B6',
   },
 });
 
@@ -721,6 +746,7 @@ const rs = StyleSheet.create({
     marginTop: 16,
     marginBottom: 12,
   },
+  iconWrapBrand: { backgroundColor: '#F1E9FA' },
   iconWrapGreen: { backgroundColor: '#EFF9F4' },
   iconWrapRed: { backgroundColor: '#FDEDEC' },
   title: {
@@ -740,7 +766,7 @@ const rs = StyleSheet.create({
     marginBottom: 14,
   },
   subtitleEmail: {
-    color: '#1A6B4A',
+    color: '#4B0082',
     fontWeight: '600',
   },
   inputWrap: { marginHorizontal: 16, marginBottom: 8 },
@@ -803,7 +829,7 @@ const rs = StyleSheet.create({
     marginTop: 4,
   },
   btnPrimary: {
-    backgroundColor: '#1A6B4A',
+    backgroundColor: '#4B0082',
     borderRadius: 11,
     height: 48,
     alignItems: 'center',
@@ -830,7 +856,7 @@ const rs = StyleSheet.create({
   },
   btnSecondaryTxtDisabled: { color: '#B4B2A9' },
   loadingBtn: {
-    backgroundColor: '#1A6B4A',
+    backgroundColor: '#4B0082',
     borderRadius: 11,
     height: 48,
     flexDirection: 'row',

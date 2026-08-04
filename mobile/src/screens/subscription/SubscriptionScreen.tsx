@@ -91,7 +91,7 @@ const SubscriptionScreen = ({ navigation }: Props) => {
         >
           <Feather name="arrow-left" size={18} color={colors.brand.textPrimary} />
         </Pressable>
-        <HadinLogo size={22} />
+        <HadinLogo size={26} />
       </View>
 
       <ScrollView

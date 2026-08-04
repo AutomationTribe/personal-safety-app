@@ -6,7 +6,7 @@ interface HadinLogoProps {
   style?: StyleProp<ImageStyle>;
 }
 
-const HadinLogo = ({ size = 28, style }: HadinLogoProps) => (
+const HadinLogo = ({ size = 34, style }: HadinLogoProps) => (
   <Image
     source={require('../../assets/hadin-login-logo.png')}
     style={[{ width: size, height: size }, style]}

@@ -176,7 +176,7 @@ const StartTripModal = ({ visible, onClose, onTripStarted }: Props) => {
       if (isTracking()) {
         attachTrip(trip.id);
       } else {
-        await startTracking(trip.id, 30);
+        await startTracking(trip.id, 30, 'continuous');
       }
 
       if (session.access_token) {
