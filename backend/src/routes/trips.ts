@@ -2,30 +2,9 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase';
 import { sendSMS } from '../services/africastalking';
+import { requireAuth, AuthRequest } from '../middleware/auth';
 
 const router = Router();
-
-// ── Auth middleware ────────────────────────────────────────────────────────────
-
-async function requireAuth(req: Request, res: Response, next: () => void): Promise<void> {
-  const header = req.headers.authorization ?? '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-
-  if (!token) {
-    res.status(401).json({ error: 'Unauthorized', code: 'AUTH_REQUIRED' });
-    return;
-  }
-
-  const { data: { user }, error } = await supabase.auth.getUser(token);
-
-  if (error || !user) {
-    res.status(401).json({ error: 'Unauthorized', code: 'AUTH_REQUIRED' });
-    return;
-  }
-
-  (req as Request & { user: typeof user }).user = user;
-  next();
-}
 
 // ── POST /api/v1/trips/notify-start ──────────────────────────────────────────
 
@@ -38,10 +17,8 @@ const NotifyStartSchema = z.object({
 
 router.post(
   '/notify-start',
-  (req: Request, res: Response, next: () => void) => { requireAuth(req, res, next); },
+  requireAuth,
   async (req: Request, res: Response): Promise<void> => {
-    const authedReq = req as Request & { user: { id: string } };
-
     const parsed = NotifyStartSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
@@ -52,7 +29,7 @@ router.post(
     }
 
     const { origin, destination, contactIds } = parsed.data;
-    const userId = authedReq.user.id;
+    const userId = (req as AuthRequest).user.id;
 
     // Fetch contacts — only ones belonging to this user (RLS-equivalent check)
     const { data: contacts, error: contactsError } = await supabase

@@ -12,7 +12,28 @@ import authRouter from './routes/auth';
 const app = express();
 
 app.use(helmet());
-app.use(cors());
+
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+// Fallback defaults for development
+const defaultOrigins = ['http://localhost:5173', 'http://localhost:3000'];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow server-to-server (no Origin header) and known origins
+      if (!origin || ALLOWED_ORIGINS.includes(origin) || defaultOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS: origin ${origin} not allowed`));
+      }
+    },
+    credentials: true,
+  }),
+);
 
 // Capture raw body for Paystack webhook signature validation BEFORE json parser
 app.use('/api/v1/payments/webhook', express.raw({ type: 'application/json' }), (req, _res, next) => {

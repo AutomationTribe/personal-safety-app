@@ -13,9 +13,11 @@ export async function sendSMS(
   body.append('message', message);
   if (senderId) body.append('from', senderId);
 
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[AT] Username:', username);
+    console.log('[AT] Key prefix:', apiKey.slice(0, 10));
+  }
   console.log('[AT] Sending SMS to', to.slice(0, 8) + '****');
-  console.log('[AT] Username:', username);
-  console.log('[AT] Key prefix:', apiKey.slice(0, 10));
 
   try {
     const res = await fetch('https://api.africastalking.com/version1/messaging', {

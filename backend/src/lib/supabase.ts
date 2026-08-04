@@ -14,3 +14,6 @@ if (!supabaseUrl || !serviceRoleKey) {
 export const supabase = createClient(supabaseUrl, serviceRoleKey, {
   auth: { persistSession: false },
 });
+
+// Named alias for routes that need service-role access explicitly
+export const supabaseAdmin = supabase;
