@@ -22,6 +22,7 @@ import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Audio } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 import { AppStackParamList } from '../../navigation/AppNavigator';
 import { supabase } from '../../lib/supabase';
 import { useNetworkStatus } from '../../hooks/useNetworkStatus';
@@ -281,7 +282,7 @@ const HomeScreen = () => {
   useEffect(() => {
     const channel = supabase
       .channel(`home-trips-${Date.now()}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, () => { loadData(); })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'trips' }, () => { loadData(); })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [loadData]);
@@ -308,7 +309,7 @@ const HomeScreen = () => {
     }
 
     // Step 3: SOS PIN
-    const pin = await AsyncStorage.getItem(SOS_PIN_KEY).catch(() => null);
+    const pin = await SecureStore.getItemAsync(SOS_PIN_KEY).catch(() => null);
     if (!pin) {
       setSetupStep('pin');
       return;
@@ -378,7 +379,7 @@ const HomeScreen = () => {
       setPinStage('confirm');
     } else {
       if (next === pinFirst) {
-        await AsyncStorage.setItem(SOS_PIN_KEY, next).catch(() => null);
+        await SecureStore.setItemAsync(SOS_PIN_KEY, next).catch(() => null);
         setPinInput('');
         setPinFirst('');
         setPinStage('enter');
@@ -473,7 +474,6 @@ const HomeScreen = () => {
   const stopAnchorRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastMovedAtRef = useRef<number>(Date.now());
   const arrivedSinceRef = useRef<number | null>(null);
-  const detectorSubRef = useRef<Location.LocationSubscription | null>(null);
   const areYouOkayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const arrivalAutoEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sosActiveRef = useRef(false);
@@ -493,64 +493,53 @@ const HomeScreen = () => {
     const destLat = activeTrip.destination_lat;
     const destLng = activeTrip.destination_lng;
 
-    Location.getForegroundPermissionsAsync().then(({ status }) => {
-      if (status !== 'granted') return;
-      Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 5000, distanceInterval: 10 },
-        (pos) => {
-          if (sosActiveRef.current) return;
-          const { latitude, longitude } = pos.coords;
-          const now = Date.now();
+    // Instead of a second watchPositionAsync, piggyback on the single tracking
+    // watcher already running in LocationService via setPositionListener.
+    setPositionListener((latitude, longitude) => {
+      if (sosActiveRef.current) return;
+      const now = Date.now();
 
-          // Keep the map / "Current Location" label live — this detector
-          // watcher already runs at ~60s cadence for stop/arrival checks,
-          // so piggyback on it instead of starting a second GPS watcher.
-          // Never centre the map on (or store) a low-accuracy fix.
-          if (isAccurateEnough(pos.coords.accuracy)) {
-            setLastPing({
-              tripId: activeTrip.id,
-              lat: latitude,
-              lng: longitude,
-              accuracy: pos.coords.accuracy,
-              speed: pos.coords.speed,
-              heading: pos.coords.heading,
-              timestamp: new Date(pos.timestamp).toISOString(),
-              source: 'gps',
-              synced: false,
-            });
-          }
+      // Update the UI map / "Current Location" label
+      setLastPing({
+        tripId: activeTrip.id,
+        lat: latitude,
+        lng: longitude,
+        accuracy: null,
+        speed: null,
+        heading: null,
+        timestamp: new Date().toISOString(),
+        source: 'gps',
+        synced: false,
+      });
 
-          // Stop-too-long
-          if (!stopAnchorRef.current) {
-            stopAnchorRef.current = { lat: latitude, lng: longitude };
-            lastMovedAtRef.current = now;
-          } else if (haversineMetres(stopAnchorRef.current.lat, stopAnchorRef.current.lng, latitude, longitude) > STOP_RADIUS_METRES) {
-            stopAnchorRef.current = { lat: latitude, lng: longitude };
-            lastMovedAtRef.current = now;
-          } else if (now - lastMovedAtRef.current >= thresholdMs) {
-            setShowAreYouOkay(true);
-          }
+      // Stop-too-long
+      if (!stopAnchorRef.current) {
+        stopAnchorRef.current = { lat: latitude, lng: longitude };
+        lastMovedAtRef.current = now;
+      } else if (haversineMetres(stopAnchorRef.current.lat, stopAnchorRef.current.lng, latitude, longitude) > STOP_RADIUS_METRES) {
+        stopAnchorRef.current = { lat: latitude, lng: longitude };
+        lastMovedAtRef.current = now;
+      } else if (now - lastMovedAtRef.current >= thresholdMs) {
+        setShowAreYouOkay(true);
+      }
 
-          // Arrival
-          if (destLat != null && destLng != null) {
-            const distToDest = haversineMetres(latitude, longitude, destLat, destLng);
-            if (distToDest <= ARRIVAL_RADIUS_METRES) {
-              if (arrivedSinceRef.current === null) {
-                arrivedSinceRef.current = now;
-              } else if (now - arrivedSinceRef.current >= ARRIVAL_DEBOUNCE_MS) {
-                setShowArrival(true);
-              }
-            } else {
-              arrivedSinceRef.current = null;
-            }
+      // Arrival
+      if (destLat != null && destLng != null) {
+        const distToDest = haversineMetres(latitude, longitude, destLat, destLng);
+        if (distToDest <= ARRIVAL_RADIUS_METRES) {
+          if (arrivedSinceRef.current === null) {
+            arrivedSinceRef.current = now;
+          } else if (now - arrivedSinceRef.current >= ARRIVAL_DEBOUNCE_MS) {
+            setShowArrival(true);
           }
-        },
-      ).then((sub) => { detectorSubRef.current = sub; }).catch(() => null);
-    }).catch(() => null);
+        } else {
+          arrivedSinceRef.current = null;
+        }
+      }
+    });
 
     return () => {
-      detectorSubRef.current?.remove();
-      detectorSubRef.current = null;
+      setPositionListener(null);
     };
   }, [activeTrip]);
 
@@ -615,7 +604,11 @@ const HomeScreen = () => {
     if (sosLoading || sosActive) return;
     setSosLoading(true);
     const firedAt = new Date();
-    const result = await triggerSOS(activeTrip?.id ?? null, activeTrip?.contact_ids ?? []);
+    const result = await triggerSOS(
+      activeTrip?.id ?? null,
+      activeTrip?.contact_ids ?? [],
+      tripContacts.map((c) => c.phone),
+    );
     setSosLoading(false);
     const timeStr = formatTime(firedAt.toISOString());
     setSosTime(timeStr);
@@ -677,7 +670,7 @@ const HomeScreen = () => {
 
     if (next.length < 4) return;
 
-    const savedPin = await AsyncStorage.getItem(SOS_PIN_KEY).catch(() => null);
+    const savedPin = await SecureStore.getItemAsync(SOS_PIN_KEY).catch(() => null);
     if (savedPin && next === savedPin) {
       setShowSOSCancelPin(false);
       setCancelPinInput('');
@@ -699,7 +692,7 @@ const HomeScreen = () => {
     setShowSOSCancelPin(false);
     setCancelPinInput('');
     setCancelPinError('');
-    await AsyncStorage.removeItem(SOS_PIN_KEY).catch(() => null);
+    await SecureStore.deleteItemAsync(SOS_PIN_KEY).catch(() => null);
     setSetupStep('pin');
   };
 

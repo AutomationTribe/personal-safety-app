@@ -4,6 +4,7 @@ import NetInfo from '@react-native-community/netinfo';
 import { Linking } from 'react-native';
 import * as SQLite from 'expo-sqlite';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 import { supabase } from '../lib/supabase';
 import { checkIsOnline } from '../hooks/useNetworkStatus';
 
@@ -51,8 +52,16 @@ const CONTACTS_CACHE_KEY = 'HADIN_SOS_CONTACTS_CACHE';
 
 async function readContactCache(): Promise<SOSContact[]> {
   try {
-    const raw = await AsyncStorage.getItem(CONTACTS_CACHE_KEY);
-    return raw ? (JSON.parse(raw) as SOSContact[]) : [];
+    // Primary: SecureStore (encrypted)
+    const raw = await SecureStore.getItemAsync(CONTACTS_CACHE_KEY);
+    if (raw) return JSON.parse(raw) as SOSContact[];
+
+    // Fallback: legacy AsyncStorage entry (pre-SEC-12 data) — read once, then
+    // migrate to SecureStore on next writeContactCache call.
+    const legacyRaw = await AsyncStorage.getItem(CONTACTS_CACHE_KEY).catch(() => null);
+    if (legacyRaw) return JSON.parse(legacyRaw) as SOSContact[];
+
+    return [];
   } catch {
     return [];
   }
@@ -60,7 +69,13 @@ async function readContactCache(): Promise<SOSContact[]> {
 
 async function writeContactCache(contacts: SOSContact[]): Promise<void> {
   try {
-    await AsyncStorage.setItem(CONTACTS_CACHE_KEY, JSON.stringify(contacts));
+    // Trim to max 5 contacts (first 5 from array), storing only name + phone.
+    // This bounds the payload to well under SecureStore's 2 048-byte limit
+    // (5 × ~40 bytes = ~200 bytes) and eliminates size concerns on Android.
+    const trimmed: Pick<SOSContact, 'id' | 'name' | 'phone'>[] = contacts.slice(0, 5).map(({ id, name, phone }) => ({ id, name, phone }));
+    await SecureStore.setItemAsync(CONTACTS_CACHE_KEY, JSON.stringify(trimmed));
+    // Remove any legacy unencrypted AsyncStorage entry
+    await AsyncStorage.removeItem(CONTACTS_CACHE_KEY).catch(() => null);
   } catch {
     // non-fatal
   }
@@ -216,6 +231,7 @@ export async function getSOSContacts(tripId: string | null): Promise<SOSContact[
 export async function triggerSOS(
   tripId: string | null,
   contactIds: string[],
+  fallbackPhones?: string[],
 ): Promise<SOSResult> {
   // 1. GPS at Accuracy.High — non-negotiable for SOS
   let lat: number;
@@ -254,28 +270,42 @@ export async function triggerSOS(
 
     if (online && token) {
       const { batteryLevel, networkType } = await getDeviceSnapshot();
-      const response = await fetch(`${BACKEND_URL}/api/v1/sos`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ tripId, lat, lng, timestamp: new Date().toISOString(), batteryLevel, networkType }),
-      });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4500);
 
-      if (response.ok) {
-        const body = (await response.json()) as {
-          success: boolean;
-          eventId?: string;
-          notified: number;
-          total: number;
-        };
-        console.log(`[SOS] Backend OK | eventId=${body.eventId} notified=${body.notified}/${body.total}`);
-        return { success: true, eventId: body.eventId, notified: body.notified, total: body.total };
+      try {
+        const response = await fetch(`${BACKEND_URL}/api/v1/sos`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ tripId, lat, lng, timestamp: new Date().toISOString(), batteryLevel, networkType }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (response.ok) {
+          const body = (await response.json()) as {
+            success: boolean;
+            eventId?: string;
+            notified: number;
+            total: number;
+          };
+          console.log(`[SOS] Backend OK | eventId=${body.eventId} notified=${body.notified}/${body.total}`);
+          return { success: true, eventId: body.eventId, notified: body.notified, total: body.total };
+        }
+
+        // 429 rate limit or other non-OK → SMS fallback
+        console.warn(`[SOS] Backend returned ${response.status} — SMS fallback`);
+      } catch (fetchErr) {
+        clearTimeout(timeoutId);
+        // AbortError means the 4 500 ms timeout fired — fall through to SMS fallback
+        const isTimeout = fetchErr instanceof Error && fetchErr.name === 'AbortError';
+        console.warn(`[SOS] Backend ${isTimeout ? 'timed out after 4500ms' : 'unreachable'} — SMS fallback`);
+        // Re-throw so the outer catch block handles it and falls through to SMS fallback
+        throw fetchErr;
       }
-
-      // 429 rate limit or other non-OK → SMS fallback
-      console.warn(`[SOS] Backend returned ${response.status} — SMS fallback`);
     }
   } catch (err) {
     console.warn('[SOS] Backend unreachable — SMS fallback:', err instanceof Error ? err.message : String(err));
@@ -287,17 +317,23 @@ export async function triggerSOS(
     await queueOfflineSOS(tripId, lat, lng, new Date().toISOString(), contactIds);
   }
 
-  // 4. SMS fallback — use cache, try a fresh fetch if cache is empty
-  let fallbackContacts = await readContactCache();
-  if (fallbackContacts.length === 0) {
-    try {
-      fallbackContacts = await getSOSContacts(tripId);
-    } catch {
-      // getSOSContacts already handles errors gracefully
+  // 4. SMS fallback — prefer phones passed by the caller (already in memory),
+  // fall back to cache, then try a fresh fetch only as last resort.
+  let phones: string[];
+  if (fallbackPhones && fallbackPhones.length > 0) {
+    phones = fallbackPhones;
+  } else {
+    let fallbackContacts = await readContactCache();
+    if (fallbackContacts.length === 0) {
+      try {
+        fallbackContacts = await getSOSContacts(tripId);
+      } catch {
+        // getSOSContacts already handles errors gracefully
+      }
     }
+    phones = fallbackContacts.map((c) => c.phone);
   }
 
-  const phones = fallbackContacts.map((c) => c.phone);
   await openSMSFallback(phones, lat, lng);
 
   console.log(`[SOS] SMS fallback opened | phones=${phones.length}`);

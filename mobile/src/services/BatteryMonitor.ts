@@ -51,3 +51,12 @@ export function stopBatteryMonitor(): void {
   _subscription = null;
   _paused = false;
 }
+
+/**
+ * Returns true if the Always Online battery monitor is currently active.
+ * Used by LocationService to skip the trip-level battery gate when the
+ * Always Online gate already covers the low-battery scenario.
+ */
+export function isRunning(): boolean {
+  return _subscription !== null;
+}

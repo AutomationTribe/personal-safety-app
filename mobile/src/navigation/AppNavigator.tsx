@@ -132,7 +132,7 @@ async function resolveInitialRoute(userId: string): Promise<keyof AppStackParamL
   }
 }
 
-const MIN_SPLASH_MS = 7000;
+const MIN_SPLASH_MS = 2500;
 
 const AppNavigator = () => {
   const [authReady, setAuthReady] = useState(false);

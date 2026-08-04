@@ -3,6 +3,7 @@ import * as SQLite from 'expo-sqlite';
 import * as Battery from 'expo-battery';
 import { supabase } from '../lib/supabase';
 import { checkIsOnline } from '../hooks/useNetworkStatus';
+import { isRunning as isBatteryMonitorRunning } from './BatteryMonitor';
 
 export type TrackingMode = 'continuous' | 'interval';
 
@@ -212,13 +213,12 @@ async function captureAndQueue(
   updateStationaryState(lat, lng);
   _positionListener?.(lat, lng);
 
-  const queued = await (await getDb()).getAllAsync<{ id: number }>(
-    `SELECT id FROM location_pings_queue WHERE synced = 0`,
-  );
-
   if (__DEV__) {
+    const countRow = await (await getDb()).getFirstAsync<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM location_pings_queue WHERE synced = 0`,
+    );
     console.log(
-      `[LocationService] Ping #${_pingCount} | accuracy: ${position.coords.accuracy?.toFixed(0)}m | stationary: ${_isStationary} | queued: ${queued.length} | mode: ${_mode ?? 'unknown'}`,
+      `[LocationService] Ping #${_pingCount} | accuracy: ${position.coords.accuracy?.toFixed(0)}m | stationary: ${_isStationary} | queued: ${countRow?.n ?? 0} | mode: ${_mode ?? 'unknown'}`,
     );
   }
 
@@ -315,6 +315,16 @@ async function switchTrackingMode(mode: TrackingMode): Promise<void> {
  * leaves tracking in whatever mode it already started in.
  */
 async function startTripBatteryGate(): Promise<void> {
+  // If the Always Online battery monitor is already running, it already covers
+  // the low-battery scenario (pause at ≤15%). Adding a second listener would
+  // cause both gates to fire independently at slightly different thresholds,
+  // creating a race between stopTracking() and switchTrackingMode(). Skip the
+  // trip gate entirely — the Always Online gate is sufficient.
+  if (isBatteryMonitorRunning()) {
+    if (__DEV__) console.log('[LocationService] Skipping trip battery gate — Always Online monitor already active');
+    return;
+  }
+
   stopTripBatteryGate();
   _tripBatteryDegraded = false;
 
@@ -589,6 +599,36 @@ export async function flushQueue(): Promise<{ synced: number; failed: number }> 
     source: string;
   }>(`SELECT * FROM location_pings_queue WHERE synced = 0 ORDER BY timestamp ASC`);
 
+  if (rows.length === 0) return { synced: 0, failed: 0 };
+
+  // Build the payload for a single bulk insert
+  const payload = rows.map((row) => ({
+    trip_id: row.trip_id.length > 0 ? row.trip_id : null,
+    coords: `POINT(${row.lng} ${row.lat})`,
+    accuracy: row.accuracy,
+    speed: row.speed,
+    heading: row.heading,
+    source: row.source,
+    synced_at: new Date().toISOString(),
+    created_at: row.timestamp,
+  }));
+
+  try {
+    const { error } = await supabase.from('location_pings').insert(payload);
+
+    if (!error) {
+      // All rows inserted — mark them all synced in one UPDATE
+      await markSynced(db, rows.map((r) => r.id));
+      return { synced: rows.length, failed: 0 };
+    }
+
+    console.warn('[LocationService] Bulk flush failed, falling back to per-row sync:', error.message);
+  } catch (err) {
+    console.warn('[LocationService] Bulk flush error, falling back to per-row sync:', err);
+  }
+
+  // Fallback: per-row sync (original behaviour) — handles partial failures
+  // gracefully (e.g. one malformed row doesn't block the rest).
   let synced = 0;
   let failed = 0;
 
