@@ -11,7 +11,8 @@ pnpm-debug.log*
 .env.*.local
 
 # Build outputs
-dist/
+mobile/dist/
+dashboard/dist/
 build/
 out/
 *.tsbuildinfo
@@ -60,7 +61,6 @@ pids/
 # Misc
 .cache/
 .parcel-cache/
-dist/
 
 # Screens (design/bug reference assets)
 screens/
