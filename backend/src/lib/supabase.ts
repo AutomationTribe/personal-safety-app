@@ -15,5 +15,7 @@ export const supabase = createClient(supabaseUrl, serviceRoleKey, {
   auth: { persistSession: false },
 });
 
-// Named alias for routes that need service-role access explicitly
+// Canonical alias for use in routes that need an explicit "admin" name
+// (payments, webhook user-existence checks). Same client instance — not a
+// second createClient call.
 export const supabaseAdmin = supabase;
