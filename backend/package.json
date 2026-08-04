@@ -15,6 +15,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=22"
+  },
   "type": "commonjs",
   "dependencies": {
     "@supabase/supabase-js": "^2.108.2",
@@ -26,6 +29,7 @@
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
     "typescript": "^6.0.3",
+    "ws": "^8.21.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -33,6 +37,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^26.0.0",
     "@types/swagger-ui-express": "^4.1.8",
+    "@types/ws": "^8.18.1",
     "js-yaml": "^5.0.0",
     "swagger-ui-express": "^5.0.1",
     "ts-node-dev": "^2.0.0"
